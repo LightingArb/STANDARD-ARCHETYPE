@@ -1,4 +1,4 @@
-# STARDARD-ARCHETYPE
+# STANDARD-ARCHETYPE
 
 > 一個 repo，同時承載 SRI 專案管理系統與 Furnace 人格供應層。
 
