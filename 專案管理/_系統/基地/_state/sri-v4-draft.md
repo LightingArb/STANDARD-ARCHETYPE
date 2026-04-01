@@ -1,4 +1,4 @@
-# SRI v4.0.0 結構草案
+﻿# SRI v4.0.0 結構草案
 
 > 狀態：草案，待 Remy 確認後才進入施工
 > 日期：2026-04-01
@@ -39,7 +39,7 @@ XX_專案名稱/
 ├── 02_參考資料/                 ← input：外部素材、raw data
 │   ├── 資料地圖.md              ← 找檔入口
 │   ├── 資料館長.md              ← 內容理解入口
-│   ├── raw_input/              ← 原始素材（使用者丟的、AI 抓的）
+│   ├── 原始素材/              ← 原始素材（使用者丟的、AI 抓的）
 │   └── 整理版/                 ← 素材的結構化整理（翻譯、摘要、分類彙整）
 │
 ├── 03_文件產出/                 ← output：AI 做完可直接用的成品
@@ -323,7 +323,7 @@ Harness 在 .md 檔案範圍內完全自主。
         "args": ["@_davideast/stitch-mcp", "proxy"]
       },
       "output_routing": {
-        "raw_design_files": "02_參考資料/raw_input/",
+        "raw_design_files": "02_參考資料/原始素材/",
         "processed_analysis": "03_文件產出/",
         "code_integration": "04_主專案程式/"
       }
@@ -432,3 +432,4 @@ Phase 4：驗證
   □ 路徑引用驗證（grep 舊路徑）
   □ 行為驗證（模擬一次半自動 + 一次 Harness 流程）
 ```
+
