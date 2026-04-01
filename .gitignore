@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Repos (Furnace compiler 的 clone 目錄)
+熔爐百相/repos/
+
+# Raw cards 太大，選擇性忽略（取消註解以排除）
+# 熔爐百相/output/raw-cards/
