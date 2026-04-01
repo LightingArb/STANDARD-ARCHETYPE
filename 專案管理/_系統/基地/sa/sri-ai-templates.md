@@ -1,4 +1,4 @@
-<!-- sri-ai-templates.md — AI 相關模板 -->
+﻿<!-- sri-ai-templates.md — AI 相關模板 -->
 <!-- sri_version: 4.0.0 -->
 <!-- 本檔定義：系統管理層與衍生檔模板（系統總覽、指令、大絕招、README、system-log、MCP） -->
 <!-- 專案容器內的檔案模板見 sri-templates.md -->
@@ -16,7 +16,7 @@
 | S-03 | 指令.md | 第二層入口 |
 | S-04 | 大絕招.md | 第三層入口（Harness） |
 | S-05 | 根 README.md | Repo 首頁說明 |
-| S-06 | 99_基地/README.md | 基地層說明 |
+| S-06 | _系統/基地/README.md | 基地層說明 |
 | S-07 | system-log.md | 系統記錄 |
 | S-08 | 人格配發規格 | `01_團隊/` 自動配發規則 |
 | S-09 | MCP 三件組 | `README.md` / `servers.json` / `policies.md` |
@@ -28,7 +28,7 @@
 所有由 SRI 生成的檔案都必須加此 header（`指令.md` 與根 README.md 除外）。
 
 ```text
-<!-- generated_from: 99_基地/sa/sri-*.md -->
+<!-- generated_from: _系統/基地/sa/sri-*.md -->
 <!-- sri_version: 4.0.0 -->
 <!-- generated_at: YYYY-MM-DD HH:mm -->
 <!-- edit_policy: DO NOT EDIT DIRECTLY — 修改請改 SRI，再跑系統更新 -->
@@ -39,7 +39,7 @@
 ## S-02. 系統總覽.md（骨架版）
 
 ```markdown
-<!-- generated_from: 99_基地/sa/sri-ai-templates.md -->
+<!-- generated_from: _系統/基地/sa/sri-ai-templates.md -->
 <!-- sri_version: 4.0.0 -->
 <!-- generated_at: YYYY-MM-DD HH:mm -->
 <!-- edit_policy: STRUCTURE SECTIONS DO NOT EDIT — 狀態區可由 AI 更新 -->
@@ -51,19 +51,19 @@
 ### 核心規則摘要
 - SRI 模組化：`sri-core / sri-templates / sri-ai-behavior / sri-ai-templates / sri-history / sri-future`
 - 日常人格與角色都來自當前容器 `01_團隊/`
-- `14_總方案.md` 的 `專案模式` 是唯一正式模式判定來源
+- `總方案.md` 的 `專案模式` 是唯一正式模式判定來源
 - `03_文件產出/` 是交付物，不是正式決策真值
 - `04_主專案程式/` 內非 `.md` 檔案一律受程式碼修改閘門管制
 - `05_沙盒區/` 分探索與子專案兩種
-- `99_基地/mcp/` 是 MCP 設定層，預設 read-only
+- `_系統/基地/mcp/` 是 MCP 設定層，預設 read-only
 - Furnace 是人格 / 角色唯一供應端
 
 ### 路徑索引
 
 #### 系統管理層
-- SRI 模組：`99_基地/sa/sri-*.md`
-- 系統記錄：`99_基地/_state/system-log.md`
-- MCP：`99_基地/mcp/`
+- SRI 模組：`_系統/基地/sa/sri-*.md`
+- 系統記錄：`_系統/基地/_state/system-log.md`
+- MCP：`_系統/基地/mcp/`
 
 #### 專案容器
 - 團隊：`01_團隊/`
@@ -156,9 +156,9 @@
 1. 直接說明這是 `STARDARD-ARCHETYPE`。
 2. 呈現 repo root 樹狀結構，至少包含：
    - `專案管理/`
-   - `專案管理/_templates/`
-   - `專案管理/99_基地/`
-   - `專案管理/99_基地/mcp/`
+   - `專案管理/_系統/templates/`
+   - `專案管理/_系統/基地/`
+   - `專案管理/_系統/基地/mcp/`
    - `熔爐百相/`
 3. 說明三態：
    - 純人工
@@ -168,15 +168,15 @@
 
 ---
 
-## S-06. 99_基地/README.md（骨架版）
+## S-06. _系統/基地/README.md（骨架版）
 
 ```markdown
-<!-- generated_from: 99_基地/sa/sri-ai-templates.md -->
+<!-- generated_from: _系統/基地/sa/sri-ai-templates.md -->
 <!-- sri_version: 4.0.0 -->
 <!-- generated_at: YYYY-MM-DD HH:mm -->
 <!-- edit_policy: DO NOT EDIT DIRECTLY — 修改請改 SRI，再跑系統更新 -->
 
-# 99_基地
+# 基地
 
 系統管理層。包含 SRI 規則原始碼、系統總覽、系統記錄與 MCP 設定層。
 
@@ -285,3 +285,4 @@
 6. AI 消化後的分析寫入 `03_文件產出/`。
 7. 實際程式碼整合寫入 `04_主專案程式/`，且先通過程式碼修改閘門。
 ```
+
