@@ -1,0 +1,53 @@
+{
+  "timestamp": "2026-04-01T11:58:36",
+  "config_version": "1.1.0",
+  "repos_attempted": 11,
+  "repos_succeeded": 11,
+  "repos_failed": [],
+  "total_cards": 313,
+  "cards_after_dedup": 306,
+  "cards_by_repo": {
+    "anthropics-skills": 18,
+    "awesome-startup": 13,
+    "get-shit-done": 10,
+    "gstack": 35,
+    "marketingskills": 37,
+    "oh-my-claudecode": 45,
+    "openai-skills": 46,
+    "pm-skills": 74,
+    "superpowers": 17,
+    "ui-ux-pro-max-skill": 10,
+    "vercel-agent-skills": 8
+  },
+  "cards_by_kind": {
+    "skill": 252,
+    "agent": 0,
+    "knowledge": 13,
+    "overview": 41,
+    "template": 0,
+    "translation": 7,
+    "tool-reference": 0
+  },
+  "cards_in_main_index": 265,
+  "cards_in_appendix": 48,
+  "dedup_merges": [
+    {
+      "canonical_group": "get-shit-done::docs/agents.md",
+      "merged": 4,
+      "kept": "en"
+    },
+    {
+      "canonical_group": "get-shit-done::docs/readme.md",
+      "merged": 5,
+      "kept": "zh-CN"
+    }
+  ],
+  "quality_checks": {
+    "cards_with_套版_one_liner": 0,
+    "cards_with_empty_framework": 83,
+    "cards_with_empty_behavior": 78,
+    "average_card_size_bytes": 4150.82
+  },
+  "errors": [],
+  "warnings": []
+}

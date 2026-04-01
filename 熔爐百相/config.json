@@ -1,0 +1,176 @@
+{
+  "version": "1.1.0",
+  "language": "繁體中文",
+  "repos": [
+    {
+      "name": "gstack",
+      "url": "https://github.com/garrytan/gstack",
+      "type": "skill",
+      "scan_targets": ["SKILL.md", "CLAUDE.md", "AGENTS.md"],
+      "scan_root_readme": true,
+      "enabled": true,
+      "extract_policy": {
+        "prefer_skill_md": true,
+        "readme_as_overview": true
+      }
+    },
+    {
+      "name": "superpowers",
+      "url": "https://github.com/obra/superpowers",
+      "type": "skill",
+      "scan_targets": ["SKILL.md", "CLAUDE.md", "AGENTS.md"],
+      "scan_root_readme": true,
+      "enabled": true,
+      "extract_policy": {
+        "prefer_skill_md": true,
+        "readme_as_overview": true
+      }
+    },
+    {
+      "name": "oh-my-claudecode",
+      "url": "https://github.com/Yeachan-Heo/oh-my-claudecode",
+      "type": "skill",
+      "scan_targets": ["SKILL.md", "CLAUDE.md", "AGENTS.md"],
+      "scan_root_readme": true,
+      "max_readme_depth": 1,
+      "enabled": true,
+      "note": "31+ skills，結構較深需遞迴掃描",
+      "extract_policy": {
+        "skip_translations": false,
+        "prefer_skill_md": true,
+        "readme_as_overview": true,
+        "dedupe_agents_docs": true
+      }
+    },
+    {
+      "name": "get-shit-done",
+      "url": "https://github.com/gsd-build/get-shit-done",
+      "type": "skill",
+      "scan_targets": ["SKILL.md", "CLAUDE.md", "AGENTS.md"],
+      "scan_root_readme": true,
+      "max_readme_depth": 2,
+      "enabled": true,
+      "note": "20+ agents/skills，散在 commands/ agents/ skills/ 資料夾",
+      "extract_policy": {
+        "skip_translations": true,
+        "canonical_language": "en",
+        "skip_patterns": ["docs/ja-jp/", "docs/ko-kr/", "docs/pt-br/", "docs/zh-cn/"],
+        "prefer_skill_md": true,
+        "readme_as_overview": true
+      }
+    },
+    {
+      "name": "ui-ux-pro-max-skill",
+      "url": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill",
+      "type": "skill",
+      "scan_targets": ["SKILL.md", "CLAUDE.md", "AGENTS.md"],
+      "scan_root_readme": true,
+      "enabled": true,
+      "extract_policy": {
+        "prefer_skill_md": true,
+        "claude_md_as": "overview"
+      }
+    },
+    {
+      "name": "pm-skills",
+      "url": "https://github.com/phuryn/pm-skills",
+      "type": "skill",
+      "scan_targets": ["SKILL.md", "CLAUDE.md", "AGENTS.md"],
+      "scan_root_readme": true,
+      "enabled": true,
+      "extract_policy": {
+        "prefer_skill_md": true,
+        "readme_as_overview": true
+      }
+    },
+    {
+      "name": "marketingskills",
+      "url": "https://github.com/coreyhaines31/marketingskills",
+      "type": "skill",
+      "scan_targets": ["SKILL.md", "CLAUDE.md", "AGENTS.md"],
+      "scan_root_readme": true,
+      "enabled": true,
+      "extract_policy": {
+        "prefer_skill_md": true,
+        "readme_as_overview": true
+      }
+    },
+    {
+      "name": "anthropics-skills",
+      "url": "https://github.com/anthropics/skills",
+      "type": "skill",
+      "scan_targets": ["SKILL.md"],
+      "scan_root_readme": true,
+      "enabled": true,
+      "note": "Anthropic 官方 skill 範例",
+      "extract_policy": {
+        "prefer_skill_md": true,
+        "readme_as_overview": true,
+        "skip_patterns": ["template/"]
+      }
+    },
+    {
+      "name": "openai-skills",
+      "url": "https://github.com/openai/skills",
+      "type": "skill",
+      "scan_targets": ["SKILL.md"],
+      "scan_root_readme": true,
+      "enabled": true,
+      "note": "OpenAI 官方 skill",
+      "extract_policy": {
+        "prefer_skill_md": true,
+        "readme_as_overview": true
+      }
+    },
+    {
+      "name": "vercel-agent-skills",
+      "url": "https://github.com/vercel-labs/agent-skills",
+      "type": "skill",
+      "scan_targets": ["SKILL.md"],
+      "scan_root_readme": true,
+      "enabled": true,
+      "note": "Vercel agent skill",
+      "extract_policy": {
+        "prefer_skill_md": true,
+        "readme_as_overview": true
+      }
+    },
+    {
+      "name": "awesome-startup",
+      "url": "https://github.com/KrishMunot/awesome-startup",
+      "type": "knowledge",
+      "scan_targets": ["README.md"],
+      "scan_root_readme": true,
+      "enabled": true,
+      "note": "知識庫型，抽取結構化知識而非 skill 人格"
+    },
+    {
+      "name": "web-access",
+      "url": "https://github.com/eze-is/web-access",
+      "type": "tool",
+      "enabled": true,
+      "note": "聯網工具 skill，不拆卡片，只記錄到工具清單"
+    },
+    {
+      "name": "gcloud-mcp",
+      "url": "https://github.com/googleapis/gcloud-mcp",
+      "type": "tool",
+      "enabled": true,
+      "note": "Google Cloud MCP，不拆卡片"
+    },
+    {
+      "name": "chrome-devtools-mcp",
+      "url": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+      "type": "tool",
+      "enabled": true,
+      "note": "Chrome DevTools MCP，不拆卡片"
+    },
+    {
+      "name": "skill-creator",
+      "url": "https://github.com/anthropics/claude-plugins-official",
+      "type": "reference",
+      "enabled": false,
+      "note": "Anthropic 官方 plugin，結構特殊，本版跳過"
+    }
+  ]
+}
