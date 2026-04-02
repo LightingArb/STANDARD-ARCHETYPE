@@ -1,9 +1,9 @@
 ﻿<!-- sri-ai-templates.md — AI 相關模板 -->
-<!-- sri_version: 4.0.0 -->
+<!-- sri_version: 4.2.0 -->
 <!-- 本檔定義：系統管理層與衍生檔模板（系統總覽、指令、大絕招、README、system-log、MCP） -->
 <!-- 專案容器內的檔案模板見 sri-templates.md -->
 
-# SRI v4.0.0 — AI 相關模板
+# SRI v4.2.0 — AI 相關模板
 
 ---
 
@@ -29,7 +29,7 @@
 
 ```text
 <!-- generated_from: _系統/基地/sa/sri-*.md -->
-<!-- sri_version: 4.0.0 -->
+<!-- sri_version: 4.2.0 -->
 <!-- generated_at: YYYY-MM-DD HH:mm -->
 <!-- edit_policy: DO NOT EDIT DIRECTLY — 修改請改 SRI，再跑系統更新 -->
 ```
@@ -40,7 +40,7 @@
 
 ```markdown
 <!-- generated_from: _系統/基地/sa/sri-ai-templates.md -->
-<!-- sri_version: 4.0.0 -->
+<!-- sri_version: 4.2.0 -->
 <!-- generated_at: YYYY-MM-DD HH:mm -->
 <!-- edit_policy: STRUCTURE SECTIONS DO NOT EDIT — 狀態區可由 AI 更新 -->
 
@@ -172,7 +172,7 @@
 
 ```markdown
 <!-- generated_from: _系統/基地/sa/sri-ai-templates.md -->
-<!-- sri_version: 4.0.0 -->
+<!-- sri_version: 4.2.0 -->
 <!-- generated_at: YYYY-MM-DD HH:mm -->
 <!-- edit_policy: DO NOT EDIT DIRECTLY — 修改請改 SRI，再跑系統更新 -->
 

@@ -1,7 +1,7 @@
 ﻿<!-- sri-future.md — SRI 未來議題 -->
-<!-- sri_version: 4.0.0 -->
+<!-- sri_version: 4.2.0 -->
 
-# SRI v4.0.0 — 未來議題
+# SRI v4.2.0 — 未來議題
 
 ---
 

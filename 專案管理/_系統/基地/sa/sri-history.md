@@ -1,7 +1,7 @@
 <!-- sri-history.md — SRI 歷史與退役對照 -->
-<!-- sri_version: 4.0.0 -->
+<!-- sri_version: 4.2.0 -->
 
-# SRI v4.0.0 — 歷史與退役對照
+# SRI v4.2.0 — 歷史與退役對照
 
 ---
 
