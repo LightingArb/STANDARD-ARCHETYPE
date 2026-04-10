@@ -195,6 +195,7 @@ class CollectorScheduler:
     SCAN_HOUR_UTC = 6        # 城市掃描時間（UTC hour）
     TRUTH_HOUR_UTC = 0       # Truth 更新時間（UTC hour）
     FORECAST_INTERVAL_H = 6  # Forecast 每 6 小時（相對間隔）
+    OBS_INTERVAL_S = 600     # 即時觀測每 10 分鐘
 
     def __init__(self):
         now = time.monotonic()
@@ -202,6 +203,7 @@ class CollectorScheduler:
         self._next_scan = now
         self._next_forecast = now
         self._next_truth = now
+        self._next_obs = now
 
     def should_scan(self) -> bool:
         return time.monotonic() >= self._next_scan
@@ -211,6 +213,9 @@ class CollectorScheduler:
 
     def should_update_truth(self) -> bool:
         return time.monotonic() >= self._next_truth
+
+    def should_update_obs(self) -> bool:
+        return time.monotonic() >= self._next_obs
 
     def mark_scanned(self) -> None:
         secs = _secs_until_utc_hour(self.SCAN_HOUR_UTC)
@@ -227,10 +232,113 @@ class CollectorScheduler:
         self._next_truth = time.monotonic() + secs
         log.info(f"Next truth update in {secs/3600:.1f}h (next {self.TRUTH_HOUR_UTC:02d}:00 UTC)")
 
+    def mark_obs_updated(self) -> None:
+        self._next_obs = time.monotonic() + self.OBS_INTERVAL_S
+
 
 # ============================================================
 # 任務函數
 # ============================================================
+
+import csv as _csv_mod
+
+_OBS_DIR = PROJ_DIR / "data" / "observations"
+_LATEST_OBS_PATH = _OBS_DIR / "latest_obs.json"
+
+
+def _write_latest_json(new_results: dict, now_str: str) -> None:
+    """merge 式寫入 latest_obs.json：成功城市覆蓋，失敗城市保留舊值。原子寫入。"""
+    old: dict = {}
+    if _LATEST_OBS_PATH.exists():
+        try:
+            raw = json.loads(_LATEST_OBS_PATH.read_text(encoding="utf-8"))
+            old = raw.get("cities", raw)
+        except Exception:
+            old = {}
+    for city, obs in new_results.items():
+        old[city] = obs
+    output = {"schema_version": 1, "updated_at_utc": now_str, "cities": old}
+    tmp = _LATEST_OBS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(_LATEST_OBS_PATH)
+
+
+def _append_obs_csv(new_results: dict, now_str: str) -> None:
+    """按月分檔 append current_obs_YYYY-MM.csv。"""
+    month_str = now_str[:7]
+    csv_path = _OBS_DIR / f"current_obs_{month_str}.csv"
+    write_header = not csv_path.exists()
+    fields = ["fetched_at_utc", "city", "station_code", "high_c",
+              "current_temp_c", "obs_time_utc", "source", "status"]
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = _csv_mod.DictWriter(f, fieldnames=fields)
+        if write_header:
+            writer.writeheader()
+        for city, obs in sorted(new_results.items()):
+            writer.writerow({
+                "fetched_at_utc": now_str,
+                "city": city,
+                "station_code": obs.get("station_code", ""),
+                "high_c": obs.get("high_c", ""),
+                "current_temp_c": obs.get("current_temp_c", ""),
+                "obs_time_utc": obs.get("obs_time_utc", ""),
+                "source": obs.get("source", ""),
+                "status": obs.get("status", ""),
+            })
+        f.flush()
+
+
+def _run_obs_fetch(ready_cities: list, seed_cities: dict) -> None:
+    """每 10 分鐘：抓 WU 即時觀測，寫 latest_obs.json + 月 CSV。"""
+    _OBS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        from _lib.current_obs_fetcher import CurrentObsFetcher, load_wu_api_key
+        api_key = load_wu_api_key()
+    except Exception as e:
+        log.warning(f"obs fetch: load fetcher failed: {e}")
+        return
+    if not api_key:
+        log.warning("obs fetch: no WU API key, skip")
+        return
+
+    fetcher = CurrentObsFetcher(api_key)
+    now_utc = datetime.now(timezone.utc)
+    now_str = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    new_results: dict = {}
+    ok_count = 0
+    fail_count = 0
+
+    for city in ready_cities:
+        city_seed = seed_cities.get(city, {})
+        station = city_seed.get("station_code", "")
+        if not station:
+            continue
+        try:
+            obs = fetcher.get_current_high(city, station)
+            if obs:
+                new_results[city] = {
+                    "high_c": obs.get("high_c"),
+                    "current_temp_c": obs.get("high_c"),  # v3 只有 max-since-7am
+                    "obs_time_utc": str(obs.get("obs_time", "")),
+                    "fetched_at_utc": now_str,
+                    "source": obs.get("source", "v3_current"),
+                    "station_code": station,
+                    "status": "ok",
+                    "schema_version": 1,
+                }
+                ok_count += 1
+            else:
+                fail_count += 1
+        except Exception as e:
+            log.warning(f"obs fetch {city}: {e}")
+            fail_count += 1
+
+    if new_results:
+        _write_latest_json(new_results, now_str)
+        _append_obs_csv(new_results, now_str)
+
+    log.info(f"obs fetch: {ok_count} ok, {fail_count} fail")
+
 
 def task_city_scan() -> bool:
     """12_city_scanner：掃描 Polymarket 城市，更新 city_status.json。"""
@@ -318,6 +426,18 @@ def run_collector(once: bool = False, verbose: bool = False) -> None:
     # 錯誤推送
     telegram_sender = _load_alert_sender()
     error_reporter = ErrorReporter(telegram_sender)
+
+    # 載入 seed_cities（obs fetch 需要 station_code）
+    seed_cities: dict = {}
+    seed_path = PROJ_DIR / "config" / "seed_cities.json"
+    if seed_path.exists():
+        try:
+            seed_cities = json.loads(seed_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning(f"Failed to load seed_cities.json: {e}")
+
+    # 確保 observations 目錄存在
+    _OBS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Bootstrap：首次使用時自動偵測既有城市（London/Paris 等）
     csm = _load_csm()
@@ -434,6 +554,15 @@ def run_collector(once: bool = False, verbose: bool = False) -> None:
                 "last_error": f"truth failed: {truth_failed_cities}" if truth_failed_cities else None,
             })
 
+        # Step 5: 即時觀測（每 10 分鐘）
+        if scheduler.should_update_obs():
+            try:
+                obs_ready = csm.get_ready_cities()
+                _run_obs_fetch(obs_ready, seed_cities)
+            except Exception as e:
+                log.warning(f"obs fetch error: {e}")
+            scheduler.mark_obs_updated()
+
         if once:
             log.info("Collector: --once mode, exiting after one cycle.")
             break
@@ -456,10 +585,24 @@ def build_parser() -> argparse.ArgumentParser:
         description="長期/批次資料收集常駐程序"
     )
     p.add_argument("--once", action="store_true", help="跑一次後退出（測試用）")
+    p.add_argument("--once-obs", action="store_true", help="只跑一次即時觀測後退出（測試用）")
     p.add_argument("--verbose", action="store_true", help="詳細 log")
     return p
 
 
 if __name__ == "__main__":
     args = build_parser().parse_args()
+    if args.once_obs:
+        if args.verbose:
+            logging.getLogger().setLevel(logging.DEBUG)
+        seed_cities: dict = {}
+        seed_path = PROJ_DIR / "config" / "seed_cities.json"
+        if seed_path.exists():
+            seed_cities = json.loads(seed_path.read_text(encoding="utf-8"))
+        _OBS_DIR.mkdir(parents=True, exist_ok=True)
+        csm = _load_csm()
+        ready = csm.get_ready_cities()
+        log.info(f"--once-obs: ready cities = {ready}")
+        _run_obs_fetch(ready, seed_cities)
+        sys.exit(0)
     run_collector(once=args.once, verbose=args.verbose)
