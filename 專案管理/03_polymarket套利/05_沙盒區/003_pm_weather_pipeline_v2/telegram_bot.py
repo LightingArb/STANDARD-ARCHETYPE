@@ -484,9 +484,9 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
                 status = "🔥峰值中"
             else:
                 status = "✅已過峰值"
-            return f"峰值：{date_prefix} {start_taipei}-{end_taipei} {status}"
+            return f"峰值：台北{date_prefix} {start_taipei}-{end_taipei} {status}"
         else:
-            return f"峰值：{date_prefix} {start_taipei}-{end_taipei}"
+            return f"峰值：台北{date_prefix} {start_taipei}-{end_taipei}"
     except Exception:
         return ""
 
