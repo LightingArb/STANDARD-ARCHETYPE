@@ -444,8 +444,8 @@ _MONTH_TO_SEASON = {
 def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
     """回傳峰值時段字串（schema_version=2，按季節）。無資料或解析失敗回傳空字串。
 
-    當天：「預報峰值窗：台北HH:MM-HH:MM ⏳/🔥/✅」
-    其他日：「預報峰值窗：台北HH:MM-HH:MM」
+    當天：「峰值：MM/DD HH:MM-HH:MM ⏳/🔥/✅」
+    其他日：「峰值：MM/DD HH:MM-HH:MM」
     """
     city_data = _peak_hours.get(city, {})
     if not city_data or not isinstance(city_data, dict):
@@ -474,6 +474,7 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
         end_dt = datetime(md.year, md.month, md.day, end_local, 0, tzinfo=tz)
         start_taipei = _to_taipei(start_dt).strftime("%H:%M")
         end_taipei = _to_taipei(end_dt).strftime("%H:%M")
+        date_prefix = market_date_str[5:].replace("-", "/")  # "2026-04-11" → "04/11"
         now_local = datetime.now(tz)
         if md == now_local.date():
             current_hour = now_local.hour
@@ -483,9 +484,9 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
                 status = "🔥峰值中"
             else:
                 status = "✅已過峰值"
-            return f"預報峰值窗：台北{start_taipei}-{end_taipei} {status}"
+            return f"峰值：{date_prefix} {start_taipei}-{end_taipei} {status}"
         else:
-            return f"預報峰值窗：台北{start_taipei}-{end_taipei}"
+            return f"峰值：{date_prefix} {start_taipei}-{end_taipei}"
     except Exception:
         return ""
 
@@ -782,13 +783,25 @@ class WeatherSignalBot:
         dates = self.reader.get_available_dates(city)
         city_tz = self.reader.get_city_timezone(city)
 
-        # 預設 = 最早結算日期（dates[0]），"latest" 也用最早
+        # 預設 = 最早「未結算」日期；"latest" 同樣邏輯
         if not date or date == "latest":
-            date = dates[0] if dates else ""
+            default_date = None
+            for d in dates:
+                h = _calc_settlement_hours(d, city_tz=city_tz)
+                if h is not None and h > 0:
+                    default_date = d
+                    break
+            date = default_date or (dates[-1] if dates else "")
 
-        # 若 date 不在列表裡（e.g. 已結算），用最早
+        # 若 date 不在列表裡（e.g. 已結算），用最早未結算
         if date and dates and date not in dates:
-            date = dates[0]
+            default_date = None
+            for d in dates:
+                h = _calc_settlement_hours(d, city_tz=city_tz)
+                if h is not None and h > 0:
+                    default_date = d
+                    break
+            date = default_date or (dates[-1] if dates else "")
 
         all_signals = self.reader.get_city_signals(city, date if date else None)
 
@@ -851,7 +864,7 @@ class WeatherSignalBot:
             return f"{c_val * 9/5 + 32:.1f}°F" if unit == "F" else f"{c_val:.1f}°C"
 
         def _build_obs_line(c_val, unit, time_str, fetch_age):
-            line = f"實況最高溫：{_fmt_temp_val(c_val, unit)}"
+            line = f"實況：{_fmt_temp_val(c_val, unit)}"
             if time_str:
                 line += f"（台北 {time_str} 觀測{fetch_age}）"
             elif fetch_age:
@@ -861,11 +874,11 @@ class WeatherSignalBot:
         if _h > 24:
             # 只顯示預報
             if _pred_high_c is not None:
-                header += f"\n預報最高溫：{_fmt_temp_val(_pred_high_c, _obs_unit)}"
+                header += f"\n預報：{_fmt_temp_val(_pred_high_c, _obs_unit)}"
         elif _h >= 6:
             # 預報 + 實況（8-24h 區間，6h 以上）
             if _pred_high_c is not None:
-                header += f"\n預報最高溫：{_fmt_temp_val(_pred_high_c, _obs_unit)}"
+                header += f"\n預報：{_fmt_temp_val(_pred_high_c, _obs_unit)}"
             if _obs_high_c is not None:
                 header += f"\n{_build_obs_line(_obs_high_c, _obs_unit, _obs_time_str, _obs_fetch_age)}"
         else:
@@ -1176,7 +1189,7 @@ class WeatherSignalBot:
                 # Line 2: 結算倒數 + 台北時間
                 countdown_line = f"  {settlement}"
                 if settlement_tp:
-                    countdown_line += f"（台北 {settlement_tp}）"
+                    countdown_line += f"（台北{settlement_tp}結算）"
 
                 entry = f"\n{i} · <b>{city}</b> · {_fmt_date(date)}\n{countdown_line}"
 
@@ -1207,12 +1220,16 @@ class WeatherSignalBot:
                         except (ValueError, TypeError):
                             pass
                     if temp_parts:
-                        entry += f"\n  {' | '.join(temp_parts)}"
+                        for part in temp_parts:
+                            entry += f"\n  {part}"
 
                     # Line 4: 峰值時段
                     peak_info = _get_peak_info(city, date, city_tz)
                     if peak_info:
                         entry += f"\n  {peak_info}"
+
+                # 空行分隔溫度/峰值區與交易資訊區
+                entry += "\n"
 
                 # Line 3/5: 合約溫度 + 方向 + 機率
                 entry += f"\n  <b>{_fmt_contract_temp(row)}</b>  {side}{prob_str}"
@@ -2039,7 +2056,7 @@ class WeatherSignalBot:
                 f"{_obs_high_c * 9 / 5 + 32:.1f}°F" if _obs_unit == "F"
                 else f"{_obs_high_c:.1f}°C"
             )
-            obs_line = f"實況最高溫：{obs_display}"
+            obs_line = f"實況：{obs_display}"
             if _obs_time_str:
                 obs_line += f"（台北 {_obs_time_str} 觀測{_obs_fetch_age_s}）"
             elif _obs_fetch_age_s:

@@ -33,7 +33,9 @@ alert_max_total_per_cycle: 10      # 每輪全局最多推送筆數
 alert_cities: all_ready            # "all_ready"（目前唯一支援值）
 
 # Signal 安全閘門
-signal_min_settlement_hours: 8      # 結算前 8 小時不出 BUY 信號（覆蓋 GFS 6 小時更新週期）
+signal_suppress_hours: 6            # < 6h → too_close_to_settlement（完全壓制）
+signal_warning_hours: 8             # 6-8h → last_forecast_warning（正常判斷，顯示在預警頁）
+signal_min_settlement_hours: 8      # 舊鍵保留（向後相容，不影響邏輯）
 signal_extreme_price_threshold: 0.95  # 任一邊 > 95¢ 視為市場已定局
 
 # Ready 門檻（4.1）
