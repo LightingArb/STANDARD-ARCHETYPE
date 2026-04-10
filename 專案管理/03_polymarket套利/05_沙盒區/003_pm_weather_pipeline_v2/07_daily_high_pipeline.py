@@ -328,9 +328,11 @@ def _merge_write_csv(
     date_col: str = "market_date_local",
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
+    replace_cities: Optional[set] = None,
 ) -> int:
     """
     Merge-write：保留 [start_date, end_date] 範圍外的舊行，用 new_rows 替換範圍內的行。
+    replace_cities 指定時，只替換屬於這些城市的行；其他城市即使在日期範圍內也保留。
     未指定日期範圍時退化為全量覆寫。回傳寫入總行數。
     """
     existing_rows: list[dict] = []
@@ -347,7 +349,9 @@ def _merge_write_csv(
                         )
                         if not in_range:
                             existing_rows.append(r)  # 範圍外：保留
-                        # 範圍內：丟棄（由 new_rows 替換）
+                        elif replace_cities is not None and r.get("city", "") not in replace_cities:
+                            existing_rows.append(r)  # 範圍內但不在目標城市：保留
+                        # 其他範圍內的行：丟棄（由 new_rows 替換）
                     except ValueError:
                         existing_rows.append(r)  # 日期無法解析：保留
         except Exception as e:
@@ -443,9 +447,14 @@ def write_step_b(
     rows: list[dict],
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
+    cities_filter: Optional[set] = None,
 ) -> None:
     out_path = PROJ_DIR / "data" / "processed" / "truth_daily_high" / "truth_daily_high_b.csv"
-    total = _merge_write_csv(rows, out_path, TRUTH_CANONICAL_FIELDS, start_date=start_date, end_date=end_date)
+    total = _merge_write_csv(
+        rows, out_path, TRUTH_CANONICAL_FIELDS,
+        start_date=start_date, end_date=end_date,
+        replace_cities=cities_filter if cities_filter else None,
+    )
     log.info(f"  Written: {out_path.relative_to(PROJ_DIR)} ({total} rows, {len(rows)} new/updated)")
 
 
@@ -573,7 +582,8 @@ def run(
     # ── Step B ──
     log.info("Step B: raw/B → truth_daily_high_b canonical...")
     truth_rows = run_step_b(cities_filter, start_date_dt, end_date_dt)
-    write_step_b(truth_rows, start_date=start_date_dt, end_date=end_date_dt)
+    write_step_b(truth_rows, start_date=start_date_dt, end_date=end_date_dt,
+                 cities_filter=cities_filter if cities_filter else None)
 
     # ── Step C ──
     log.info("Step C: join → market_day_error_table...")

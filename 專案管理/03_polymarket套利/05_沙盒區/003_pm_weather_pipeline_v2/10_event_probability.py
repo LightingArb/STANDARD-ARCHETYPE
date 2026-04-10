@@ -51,6 +51,7 @@ OUTPUT_FIELDS = [
     "model_scope",
     "predicted_daily_high",
     "lead_day",
+    "lead_hours_to_settlement",
     "bucket_used",
     "bucket_sample_count",
     "p_yes",
@@ -97,16 +98,19 @@ def compute_p_yes(
         count = sum(1 for e in sorted_errors if lo <= e <= hi)
 
     elif contract_type == "range" and range_low is not None and range_high is not None:
-        lo = range_low - predicted_high
-        hi = range_high - predicted_high
+        # 擴展邊界 ±precision_half，與 exact 保持一致（相鄰 bin 之間不留縫隙）
+        lo = range_low - precision_half - predicted_high
+        hi = range_high + precision_half - predicted_high
         count = sum(1 for e in sorted_errors if lo <= e <= hi)
 
     elif contract_type == "higher" and threshold is not None:
-        thresh_err = threshold - predicted_high
-        count = sum(1 for e in sorted_errors if e > thresh_err)
+        # 「X° or higher」= actual >= X - precision_half（與相鄰 exact bin 無縫銜接）
+        thresh_err = (threshold - precision_half) - predicted_high
+        count = sum(1 for e in sorted_errors if e >= thresh_err)
 
     elif contract_type == "below" and threshold is not None:
-        thresh_err = threshold - predicted_high
+        # 「X° or below」= actual < X + precision_half（與相鄰 exact bin 無縫銜接）
+        thresh_err = (threshold + precision_half) - predicted_high
         count = sum(1 for e in sorted_errors if e < thresh_err)
 
     else:
@@ -159,6 +163,9 @@ def load_forecast_map(city: str) -> dict[tuple, list[dict]]:
                     continue
                 result.setdefault((sid, mdate), []).append(row)
     for key in result:
+        # 先按 snapshot_time_utc 降序（最新在前），再穩定按 lead_day 升序
+        # 這樣同 lead_day 時保證拿到最新 snapshot
+        result[key].sort(key=lambda r: r.get("snapshot_time_utc", ""), reverse=True)
         result[key].sort(key=lambda r: int(r.get("lead_day") or 99))
     return result
 
@@ -178,16 +185,36 @@ def get_forecast_row(
     return candidates[0]  # Minimum lead_day = most recent forecast
 
 
-def get_bucket(model: dict, lead_day: int) -> dict | None:
-    """Look up bucket by lead_day. Falls back to nearest available if exact is absent."""
+def get_bucket(
+    model: dict,
+    lead_day: int,
+    lead_hours: float | None = None,
+) -> tuple[dict | None, str | None]:
+    """
+    Look up error bucket.
+    Priority: lead_hours_{N} (6h granularity) → lead_day_{N} (exact) → nearest lead_day fallback.
+    lead_hours bucket is only used if it exists AND n >= 100 (built by 09 with MIN_HOURS_BUCKET_SAMPLES).
+    """
     buckets = model.get("buckets", {})
+
+    # 1. Try lead_hours bucket (more granular, only present when enough samples)
+    if lead_hours is not None:
+        bh = (int(lead_hours) // 6) * 6
+        hours_key = f"lead_hours_{bh}"
+        if hours_key in buckets:
+            log.debug(f"Bucket: {hours_key} (lead_hours={lead_hours:.1f}h)")
+            return buckets[hours_key], hours_key
+
+    # 2. Exact lead_day bucket
     key = f"lead_day_{lead_day}"
     if key in buckets:
         return buckets[key], key
 
-    # Fallback: nearest available lead_day
+    # 3. Nearest available lead_day fallback
     available = []
     for k, b in buckets.items():
+        if not k.startswith("lead_day_"):
+            continue
         ld = b.get("lead_day")
         if ld is not None:
             available.append((abs(int(ld) - lead_day), k, b))
@@ -308,12 +335,15 @@ def run(
                     range_low = _f_to_c(range_low)
                 if range_high is not None:
                     range_high = _f_to_c(range_high)
+                # precision_half 也要轉成 °C（range_low/high 已轉 C，單位要一致）
+                half_w = half_w * 5.0 / 9.0
                 log.debug(
                     f"  F→C conversion: threshold={threshold} "
-                    f"range=[{range_low}, {range_high}]"
+                    f"range=[{range_low}, {range_high}] half_w={half_w:.4f}°C"
                 )
 
             # ── Get forecast ──
+            _lead_hours_to_settlement = ""
             if forecast_override is not None:
                 predicted = forecast_override
                 actual_lead_day = lead_day_override if lead_day_override is not None else 1
@@ -326,9 +356,11 @@ def run(
                 if predicted is None:
                     continue
                 actual_lead_day = int(frow.get("lead_day") or 1)
+                _lead_hours_to_settlement = frow.get("lead_hours_to_settlement", "")
 
-            # ── Get bucket ──
-            bucket, bucket_key = get_bucket(model, actual_lead_day)
+            # ── Get bucket（優先 lead_hours 6h bucket，fallback lead_day）──
+            _lead_hours_val = safe_float(_lead_hours_to_settlement) if _lead_hours_to_settlement else None
+            bucket, bucket_key = get_bucket(model, actual_lead_day, lead_hours=_lead_hours_val)
             if bucket is None:
                 log.warning(f"  No bucket for {city} lead_day={actual_lead_day}, skipping market {market_id}")
                 continue
@@ -363,6 +395,7 @@ def run(
                 "model_scope": MODEL_SCOPE,
                 "predicted_daily_high": round(predicted, 4),
                 "lead_day": actual_lead_day,
+                "lead_hours_to_settlement": _lead_hours_to_settlement,
                 "bucket_used": bucket_key,
                 "bucket_sample_count": bucket.get("sample_count", len(sorted_errors)),
                 "p_yes": p_yes,

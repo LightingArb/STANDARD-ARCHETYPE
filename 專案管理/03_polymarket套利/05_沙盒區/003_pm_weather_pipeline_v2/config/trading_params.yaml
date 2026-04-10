@@ -47,5 +47,7 @@ backfill_start_date: "2023-01-01"  # 新城市回補預設起始日
 position_edge_shrink_threshold: 0.10  # edge 降到此比例以下時推送 🟡 通知
 
 # === 即時觀測邏輯裁剪（2026-04-09）===
-use_current_obs: true                  # 啟用 WU v3 即時觀測邏輯裁剪
-current_obs_cache_ttl_seconds: 1800    # 快取 30 分鐘（節省 API quota）
+use_current_obs: true                        # 啟用 WU v3 即時觀測邏輯裁剪
+current_obs_default_ttl_seconds: 1800        # 正常城市快取 30 分鐘（節省 API quota）
+current_obs_settling_ttl_seconds: 600        # 結算中城市快取 10 分鐘（更頻繁更新）
+current_obs_cache_ttl_seconds: 1800          # 向後相容（signal_main 舊版讀取）

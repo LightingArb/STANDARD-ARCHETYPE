@@ -96,6 +96,17 @@ def _best_depth(row: dict) -> float:
     return max(_safe_float(row.get("yes_sweet_usd"), 0), _safe_float(row.get("no_sweet_usd"), 0))
 
 
+def _lead_hours(row: dict) -> Optional[float]:
+    """Parse lead_hours_to_settlement from a row. Returns None if missing/invalid."""
+    v = row.get("lead_hours_to_settlement", "")
+    if v == "" or v is None:
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
 # ============================================================
 # SignalDataReader
 # ============================================================
@@ -226,10 +237,75 @@ class SignalDataReader:
             rows = self._read_city_ev_csv(city)
             all_rows.extend(rows)
 
-        # Filter: active + actionable
+        # Filter: active + actionable + hours > 24 (None = include, treat as far future)
         actionable = [
             r for r in all_rows
             if r.get("signal_status") == "active"
+            and r.get("signal_action") in ("BUY_YES", "BUY_NO")
+            and (_lead_hours(r) is None or _lead_hours(r) > 24)
+        ]
+
+        sort_fn = {
+            "edge": _best_edge,
+            "ev": _best_ev,
+            "depth": _best_depth,
+        }.get(sort_by, _best_edge)
+
+        actionable.sort(key=sort_fn, reverse=True)
+        total = len(actionable)
+        return (actionable[offset: offset + limit], total)
+
+    def get_today_signals_ranked(
+        self,
+        sort_by: str = "edge",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """
+        今日信號排行：signal_status=active + signal_action BUY + hours_to_settlement <= 24。
+        """
+        cities = self.get_ready_cities()
+        all_rows: list[dict] = []
+        for city in cities:
+            rows = self._read_city_ev_csv(city)
+            all_rows.extend(rows)
+
+        actionable = [
+            r for r in all_rows
+            if r.get("signal_status") == "active"
+            and r.get("signal_action") in ("BUY_YES", "BUY_NO")
+            and _lead_hours(r) is not None
+            and _lead_hours(r) <= 24
+        ]
+
+        sort_fn = {
+            "edge": _best_edge,
+            "ev": _best_ev,
+            "depth": _best_depth,
+        }.get(sort_by, _best_edge)
+
+        actionable.sort(key=sort_fn, reverse=True)
+        total = len(actionable)
+        return (actionable[offset: offset + limit], total)
+
+    def get_warning_signals_ranked(
+        self,
+        sort_by: str = "edge",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """
+        預警排行：signal_status=last_forecast_warning + signal_action BUY（6-8h 最後預報）。
+        """
+        cities = self.get_ready_cities()
+        all_rows: list[dict] = []
+        for city in cities:
+            rows = self._read_city_ev_csv(city)
+            all_rows.extend(rows)
+
+        actionable = [
+            r for r in all_rows
+            if r.get("signal_status") == "last_forecast_warning"
             and r.get("signal_action") in ("BUY_YES", "BUY_NO")
         ]
 

@@ -1,4 +1,4 @@
-﻿<!-- sri-ai-behavior.md — AI 操作員行為規範 -->
+<!-- sri-ai-behavior.md — AI 操作員行為規範 -->
 <!-- sri_version: 4.2.0 -->
 <!-- 本檔定義：AI 的讀取邏輯、判斷規則、角色系統、Furnace 對接與 MCP 邊界 -->
 <!-- 專案結構與安全規則見 sri-core.md；模板見 sri-templates.md / sri-ai-templates.md -->

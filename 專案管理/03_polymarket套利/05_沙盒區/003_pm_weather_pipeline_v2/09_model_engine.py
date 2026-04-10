@@ -111,6 +111,29 @@ def _build_empirical_bucket(ld: int, errors: list[float], merged_from: list[int]
     }
 
 
+# 6 小時精度 bucket 需要的最小樣本量（比 lead_day 更嚴格）
+MIN_HOURS_BUCKET_SAMPLES = 100
+
+
+def _build_empirical_bucket_hours(bucket_hours: int, errors: list[float]) -> dict:
+    """Build a lead_hours bucket (6h granularity). Only called when n >= MIN_HOURS_BUCKET_SAMPLES."""
+    n = len(errors)
+    sorted_errors = sorted(errors)
+    mean_val = round(sum(sorted_errors) / n, 4) if n > 0 else 0.0
+    variance = sum((x - mean_val) ** 2 for x in sorted_errors) / n if n > 0 else 0.0
+    std_val = round(variance ** 0.5, 4)
+    quantiles = {f"q{p:02d}": compute_quantile(sorted_errors, p) for p in QUANTILE_PERCENTILES}
+    return {
+        "lead_hours": bucket_hours,
+        "sample_count": n,
+        "bucket_status": "sufficient",
+        "sorted_errors": [round(e, 4) for e in sorted_errors],
+        "quantiles": quantiles,
+        "mean": mean_val,
+        "std": std_val,
+    }
+
+
 def build_empirical_model(city: str, error_rows: list[dict]) -> dict:
     """Build empirical signed-residual ECDF model."""
     # Group errors by lead_day
@@ -144,6 +167,26 @@ def build_empirical_model(city: str, error_rows: list[dict]) -> dict:
                 bucket["bucket_status"] = "insufficient"
 
         buckets[f"lead_day_{ld}"] = bucket
+
+    # ── lead_hours buckets（6h 精度，樣本 >= 100 才建）──
+    # GFS 每 6h 更新一次，lead_day_1 涵蓋 7-30h 的誤差特性差異較大
+    hours_groups: dict[int, list[float]] = {}
+    for row in error_rows:
+        lh = safe_float(row.get("lead_hours_to_settlement"))
+        err = safe_float(row.get("error"))
+        if lh is not None and err is not None and lh >= 0:
+            bh = (int(lh) // 6) * 6
+            hours_groups.setdefault(bh, []).append(err)
+
+    hours_count = 0
+    for bh in sorted(hours_groups.keys()):
+        errors_h = hours_groups[bh]
+        if len(errors_h) >= MIN_HOURS_BUCKET_SAMPLES:
+            buckets[f"lead_hours_{bh}"] = _build_empirical_bucket_hours(bh, errors_h)
+            hours_count += 1
+
+    if hours_count:
+        log.debug(f"  {city}: {hours_count} lead_hours buckets built")
 
     dates = sorted(r["market_date_local"] for r in error_rows if r.get("market_date_local"))
     return {

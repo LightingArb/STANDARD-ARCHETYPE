@@ -1,18 +1,21 @@
 {
   "schema_version": "users_v1",
-  "updated_at_utc": "2026-04-08T21:54:06Z",
+  "updated_at_utc": "2026-04-09T10:11:54Z",
   "allowed_chat_ids": [
-    "752773419"
+    "752773419",
+    "920431970",
+    "5897586989",
+    "7707284433"
   ],
   "admin_chat_ids": [
     "752773419"
   ],
   "user_details": {
     "752773419": {
-      "display_name": "owner",
-      "added_at_utc": "2026-04-08T21:54:06Z",
+      "display_name": "Remy",
+      "added_at_utc": "2026-04-09T00:00:00Z",
       "added_by": "bootstrap",
-      "note": "auto-created from telegram.yaml chat_id"
+      "note": "owner"
     }
   }
 }

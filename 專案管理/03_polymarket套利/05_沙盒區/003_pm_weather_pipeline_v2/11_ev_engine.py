@@ -118,6 +118,7 @@ OUTPUT_FIELDS = [
     "no_fixed_exhausted",
     # 即時觀測邏輯裁剪欄位
     "observed_high_c",
+    "obs_time",
     "observation_clipped",
     "clip_reason",
     "observation_source",
@@ -797,10 +798,15 @@ def run(
 
             # ── 即時觀測邏輯裁剪（在 EV 計算之前）────────────────────────
             out_row["observed_high_c"] = ""
+            out_row["obs_time"] = ""
             out_row["observation_source"] = ""
             out_row["observation_clipped"] = False
             out_row["clip_reason"] = ""
             _apply_observation_clipping(out_row, _obs, city_timezones)
+            # obs_time：從即時觀測 cache 補入（不在 clipping 函式內，避免修改簽名）
+            _city_obs = _obs.get(city)
+            if _city_obs:
+                out_row["obs_time"] = _city_obs.get("obs_time", "")
             # 更新 local p_yes/p_no（裁剪後可能已改變）
             p_yes = out_row["p_yes"]
             p_no = out_row["p_no"]
