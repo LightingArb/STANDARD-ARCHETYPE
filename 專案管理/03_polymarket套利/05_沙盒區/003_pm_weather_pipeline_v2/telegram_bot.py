@@ -636,7 +636,7 @@ class WeatherSignalBot:
             "pid": os.getpid(),
             "last_callback_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         })
-        buttons = [["排行", "今日", "預警"], ["結算中", "城市", "管理"]]
+        buttons = [["今日", "預警6-8h", "結算<6h"], ["排行", "城市", "管理"]]
         reply_keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True)
         await update.message.reply_text("系統啟動", reply_markup=reply_keyboard)
 
@@ -1061,7 +1061,7 @@ class WeatherSignalBot:
             results, total = self.reader.get_today_signals_ranked(
                 sort_by=sort_by, limit=self.page_size, offset=offset
             )
-        sort_label = {"edge": "📋 今日信號", "depth": "📋 今日信號（深度）"}.get(sort_by, "📋 今日信號")
+        sort_label = {"edge": "📋 今日信號（8-24小時）", "depth": "📋 今日信號（8-24小時·深度）"}.get(sort_by, "📋 今日信號（8-24小時）")
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
             title=sort_label,
@@ -1093,11 +1093,11 @@ class WeatherSignalBot:
             results, total = self.reader.get_warning_signals_ranked(
                 sort_by=sort_by, limit=self.page_size, offset=offset
             )
-        sort_label = {"edge": "⚠️ 最後預報", "depth": "⚠️ 最後預報（深度）"}.get(sort_by, "⚠️ 最後預報")
+        sort_label = {"edge": "⚠️ 預警（6-8小時）", "depth": "⚠️ 預警（6-8小時·深度）"}.get(sort_by, "⚠️ 預警（6-8小時）")
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
             title=sort_label,
-            empty_msg="目前沒有即將結算的信號",
+            empty_msg="目前沒有預警信號",
             nav_prefix="warn",
             show_forecast_peak=True,
         )
@@ -1921,7 +1921,7 @@ class WeatherSignalBot:
             settling_groups = summary.get("settling", [])
             if not settling_groups:
                 await update.message.reply_text(
-                    "<b>結算中</b>\n目前沒有即將結算的合約",
+                    "<b>結算&lt;6h</b>\n目前沒有即將結算的合約",
                     parse_mode="HTML",
                 )
                 return
@@ -1944,7 +1944,7 @@ class WeatherSignalBot:
                         settling.append((city, d, h))
             if not settling:
                 await update.message.reply_text(
-                    "<b>結算中</b>\n目前沒有即將結算的合約",
+                    "<b>結算&lt;6h</b>\n目前沒有即將結算的合約",
                     parse_mode="HTML",
                 )
                 return
@@ -1974,7 +1974,7 @@ class WeatherSignalBot:
         else:
             hrs_display = f"{int(hours)}小時"
 
-        header = f"結算中 — <b>{city}</b> · {_fmt_date(market_date)}\n"
+        header = f"結算&lt;6h — <b>{city}</b> · {_fmt_date(market_date)}\n"
         header += f"結算倒數：{hrs_display}"
         if settlement_taipei:
             header += f"（台北 {settlement_taipei} 結算）"
@@ -2547,8 +2547,8 @@ def main() -> None:
     # Reply keyboard text handlers（6 個按鈕，2 排）
     app.add_handler(MessageHandler(filters.Regex("^排行$"), bot.cmd_ranking_msg))
     app.add_handler(MessageHandler(filters.Regex("^今日$"), bot.cmd_today_msg))
-    app.add_handler(MessageHandler(filters.Regex("^預警$"), bot.cmd_warning_msg))
-    app.add_handler(MessageHandler(filters.Regex("^結算中$"), bot.cmd_settling_msg))
+    app.add_handler(MessageHandler(filters.Regex("^預警6-8h$"), bot.cmd_warning_msg))
+    app.add_handler(MessageHandler(filters.Regex("^結算<6h$"), bot.cmd_settling_msg))
     app.add_handler(MessageHandler(filters.Regex("^城市$"), bot.cmd_cities))
     app.add_handler(MessageHandler(filters.Regex("^管理$"), bot.cmd_admin))
     # Fallback：任何未匹配文字 → 重設 Reply keyboard
