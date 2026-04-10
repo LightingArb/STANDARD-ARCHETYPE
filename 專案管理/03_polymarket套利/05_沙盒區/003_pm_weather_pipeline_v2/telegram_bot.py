@@ -472,9 +472,15 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
         md = _date.fromisoformat(market_date_str)
         start_dt = datetime(md.year, md.month, md.day, start_local, 0, tzinfo=tz)
         end_dt = datetime(md.year, md.month, md.day, end_local, 0, tzinfo=tz)
-        start_taipei = _to_taipei(start_dt).strftime("%H:%M")
-        end_taipei = _to_taipei(end_dt).strftime("%H:%M")
-        date_prefix = market_date_str[5:].replace("-", "/")  # "2026-04-11" → "04/11"
+        start_tp = _to_taipei(start_dt)
+        end_tp = _to_taipei(end_dt)
+        start_taipei = start_tp.strftime("%H:%M")
+        # 跨台北午夜時，end 顯示含日期；同日則只顯示時間
+        if start_tp.date() == end_tp.date():
+            end_taipei = end_tp.strftime("%H:%M")
+        else:
+            end_taipei = end_tp.strftime("%m/%d %H:%M")
+        date_prefix = start_tp.strftime("%m/%d")  # 從台北轉換後的 datetime 取日期
         now_local = datetime.now(tz)
         if md == now_local.date():
             current_hour = now_local.hour
