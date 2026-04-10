@@ -889,31 +889,37 @@ class WeatherSignalBot:
                 else:
                     depth = 0.0
 
-                # 價格顯示
-                if yes_ask is None and no_ask is None:
-                    price_str = "Y—  N—  D—"
-                else:
-                    y_str = f"Y${yes_ask:.2f}" if yes_ask is not None else "Y—"
-                    n_str = f"N${no_ask:.2f}" if no_ask is not None else "N—"
-                    d_str = f"D${depth:.0f}" if depth and depth > 0 else "D—"
-                    price_str = f"{y_str}  {n_str}  {d_str}"
+                # 6 種狀態分類
+                clipped = str(row.get("observation_clipped", "")).lower() == "true"
+                row_status = row.get("signal_status", "")
 
-                # Edge 顯示
-                if action == "SUPPRESSED":
-                    edge_str = "⏸"
+                y_str = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
+                n_str = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
+                d_str = f"  D${depth:.0f}" if depth and depth > 0 else ""
+                price_line = f"\n  {y_str} / {n_str}{d_str}"
+
+                if clipped:
+                    # 已鎖定：無價格行
+                    line = f"{temp_str}  已鎖定（已超過）"
+                elif row_status == "stale_price":
+                    # 價格過時：無價格行
+                    line = f"{temp_str}  價格過時"
                 elif yes_ask is None and no_ask is None:
-                    edge_str = ""
+                    # 無掛單：無價格行
+                    line = f"{temp_str}  無掛單"
+                elif row_status == "market_extreme":
+                    # 市場極端：顯示價格
+                    line = f"{temp_str}  市場極端{price_line}"
                 else:
+                    # 正常：依 edge 判斷
                     best_e = max(yes_e, no_e)
                     if best_e > 0.001:
                         edge_str = f"YES▲+{best_e*100:.1f}%" if yes_e >= no_e else f"NO▲+{best_e*100:.1f}%"
                     else:
-                        edge_str = "—"
+                        edge_str = "無優勢"
+                    warn_tag = " ⚠️最後預報" if row_status == "last_forecast_warning" else ""
+                    line = f"{temp_str}  {edge_str}{warn_tag}{price_line}"
 
-                # 最後預報標記
-                warn_tag = " ⚠️最後預報" if row.get("signal_status") == "last_forecast_warning" else ""
-
-                line = f"{temp_str}  {price_str}  {edge_str}{warn_tag}"
                 rows_text.append(line)
 
             body = "\n".join(rows_text)
@@ -2042,7 +2048,7 @@ class WeatherSignalBot:
 
         body = ""
         if locked:
-            body += "\n🔒 已鎖定：\n"
+            body += "\n已鎖定：\n"
             for r in locked:
                 temp = _fmt_contract_temp(r)
                 yes_ask = _safe_float(r.get("yes_ask_price"), None)
@@ -2050,11 +2056,11 @@ class WeatherSignalBot:
                 y = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
                 n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
                 reason = r.get("clip_reason", "")
-                reason_str = f"  ({reason})" if reason else ""
-                body += f"  {temp}  {y} / {n}{reason_str}\n"
+                reason_str = f"  {reason}" if reason else ""
+                body += f"  {temp}{reason_str}  {y} / {n}\n"
 
         if unlocked:
-            body += "\n⏳ 未鎖定：\n"
+            body += "\n未鎖定：\n"
             for r in unlocked:
                 temp = _fmt_contract_temp(r)
                 p_yes_raw = r.get("p_yes", "")
