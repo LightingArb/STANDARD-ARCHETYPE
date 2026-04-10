@@ -770,6 +770,9 @@ async def run_ws_mode(
                 if not ev_ok:
                     raise RuntimeError("11_ev_engine failed (WS mode)")
 
+                # 預計算 signal_summary.json（供 bot 快速讀取，不阻塞主流程）
+                _write_signal_summary(ev_results)
+
                 # ── WS 事件時效性檢查（> 5 分鐘無事件 → 推錯誤）──
                 last_ws_utc = _get_ws_last_event_utc(bsm) if not ws_fallback_active else None
                 if last_ws_utc and not ws_fallback_active:
@@ -890,6 +893,111 @@ async def run_ws_mode(
     except Exception as e:
         log.warning(f"Final flush error: {e}")
     log.info("WS signal done.")
+
+
+# ============================================================
+# signal_summary.json 預計算（供 telegram_bot 快速讀取）
+# ============================================================
+
+def _write_signal_summary(ev_results: list) -> None:
+    """ev_engine 跑完後，分四組寫 data/results/signal_summary.json（原子寫入）。
+
+    四組：ranking（> 24h active BUY）、today（≤ 24h active BUY）、
+          warning（last_forecast_warning BUY）、settling（< 6h，含全部合約）。
+    """
+    import math
+    from collections import defaultdict
+
+    def _sf(v, default=0.0):
+        if v is None:
+            return default
+        try:
+            f = float(v)
+            return default if (math.isnan(f) or math.isinf(f)) else f
+        except (TypeError, ValueError):
+            return default
+
+    def _lead_hrs(row):
+        v = row.get("lead_hours_to_settlement", "")
+        if v == "" or v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _best_edge(row):
+        return max(_sf(row.get("yes_edge"), -999), _sf(row.get("no_edge"), -999))
+
+    def _sanitize(obj):
+        """遞迴把 nan/inf 替換成 None，確保 JSON 可序列化。"""
+        if isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sanitize(v) for v in obj]
+        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        return obj
+
+    try:
+        ranking, today, warning, settling_rows = [], [], [], []
+        for row in ev_results:
+            hours = _lead_hrs(row)
+            action = row.get("signal_action", "")
+            status = row.get("signal_status", "")
+            is_buy = action in ("BUY_YES", "BUY_NO")
+            is_active = status == "active"
+            is_warn = status == "last_forecast_warning"
+
+            if hours is not None and 0 < hours < 6:
+                settling_rows.append(row)
+            if is_active and is_buy:
+                if hours is None or hours > 24:
+                    ranking.append(row)
+                elif hours <= 24:
+                    today.append(row)
+            if is_warn and is_buy:
+                warning.append(row)
+
+        ranking.sort(key=_best_edge, reverse=True)
+        today.sort(key=_best_edge, reverse=True)
+        warning.sort(key=_best_edge, reverse=True)
+
+        # settling：按 (city, market_date_local) 分組
+        grp: dict = defaultdict(list)
+        for r in settling_rows:
+            grp[(r.get("city", ""), r.get("market_date_local", ""))].append(r)
+
+        settling = []
+        for (city, date), rows in grp.items():
+            hrs_list = [_lead_hrs(r) for r in rows if _lead_hrs(r) is not None]
+            settling.append({
+                "city": city,
+                "market_date": date,
+                "hours_to_settlement": min(hrs_list) if hrs_list else 0.0,
+                "rows": rows,
+            })
+        settling.sort(key=lambda x: x["hours_to_settlement"])
+
+        summary = _sanitize({
+            "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ranking": ranking,
+            "today": today,
+            "warning": warning,
+            "settling": settling,
+        })
+
+        path = PROJ_DIR / "data" / "results" / "signal_summary.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+        log.info(
+            f"signal_summary written: ranking={len(ranking)} today={len(today)} "
+            f"warning={len(warning)} settling={len(settling)} groups"
+        )
+    except Exception as e:
+        log.warning(f"_write_signal_summary failed: {e}")
 
 
 # ============================================================
@@ -1018,6 +1126,9 @@ def run_signal(
                 )
                 if not ok_ev:
                     raise RuntimeError("11_ev_engine failed")
+
+                # 4b. 預計算 signal_summary.json（供 bot 快速讀取，不阻塞主流程）
+                _write_signal_summary(ev_results)
 
                 # 5. STEP 10：AlertEngine 通報
                 if alert_engine is not None:

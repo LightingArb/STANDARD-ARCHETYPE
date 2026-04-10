@@ -422,6 +422,17 @@ def _read_latest_obs() -> dict:
         return {}
 
 
+def _read_signal_summary() -> dict:
+    """讀 data/results/signal_summary.json（signal_main 每輪預計算）。失敗回傳空 dict。"""
+    path = PROJ_DIR / "data" / "results" / "signal_summary.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
     """回傳峰值時段字串。無資料或解析失敗回傳空字串。
 
@@ -1002,9 +1013,23 @@ class WeatherSignalBot:
         sort_by: str = "edge",
         offset: int = 0,
     ) -> None:
-        results, total = self.reader.get_all_signals_ranked(
-            sort_by=sort_by, limit=self.page_size, offset=offset
-        )
+        summary = _read_signal_summary()
+        if summary:
+            rows = list(summary.get("ranking", []))
+            if sort_by == "depth":
+                rows.sort(
+                    key=lambda r: max(
+                        _safe_float(r.get("yes_sweet_usd")),
+                        _safe_float(r.get("no_sweet_usd")),
+                    ),
+                    reverse=True,
+                )
+            total = len(rows)
+            results = rows[offset: offset + self.page_size]
+        else:
+            results, total = self.reader.get_all_signals_ranked(
+                sort_by=sort_by, limit=self.page_size, offset=offset
+            )
         sort_label = {"edge": "價差排名", "depth": "深度排名"}.get(sort_by, sort_by)
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
@@ -1019,9 +1044,23 @@ class WeatherSignalBot:
         sort_by: str = "edge",
         offset: int = 0,
     ) -> None:
-        results, total = self.reader.get_today_signals_ranked(
-            sort_by=sort_by, limit=self.page_size, offset=offset
-        )
+        summary = _read_signal_summary()
+        if summary:
+            rows = list(summary.get("today", []))
+            if sort_by == "depth":
+                rows.sort(
+                    key=lambda r: max(
+                        _safe_float(r.get("yes_sweet_usd")),
+                        _safe_float(r.get("no_sweet_usd")),
+                    ),
+                    reverse=True,
+                )
+            total = len(rows)
+            results = rows[offset: offset + self.page_size]
+        else:
+            results, total = self.reader.get_today_signals_ranked(
+                sort_by=sort_by, limit=self.page_size, offset=offset
+            )
         sort_label = {"edge": "📋 今日信號", "depth": "📋 今日信號（深度）"}.get(sort_by, "📋 今日信號")
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
@@ -1037,9 +1076,23 @@ class WeatherSignalBot:
         sort_by: str = "edge",
         offset: int = 0,
     ) -> None:
-        results, total = self.reader.get_warning_signals_ranked(
-            sort_by=sort_by, limit=self.page_size, offset=offset
-        )
+        summary = _read_signal_summary()
+        if summary:
+            rows = list(summary.get("warning", []))
+            if sort_by == "depth":
+                rows.sort(
+                    key=lambda r: max(
+                        _safe_float(r.get("yes_sweet_usd")),
+                        _safe_float(r.get("no_sweet_usd")),
+                    ),
+                    reverse=True,
+                )
+            total = len(rows)
+            results = rows[offset: offset + self.page_size]
+        else:
+            results, total = self.reader.get_warning_signals_ranked(
+                sort_by=sort_by, limit=self.page_size, offset=offset
+            )
         sort_label = {"edge": "⚠️ 最後預報", "depth": "⚠️ 最後預報（深度）"}.get(sort_by, "⚠️ 最後預報")
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
@@ -1861,33 +1914,59 @@ class WeatherSignalBot:
     async def _handle_settling(
         self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
     ) -> None:
-        """掃描所有 ready 城市，找 < 6h 的合約並渲染結算中頁面。"""
-        settling: list[tuple[str, str, float]] = []  # (city, date, hours)
-        for city in self.reader.get_ready_cities():
-            city_tz = self.reader.get_city_timezone(city)
-            for d in self.reader.get_available_dates(city):
-                h = _calc_settlement_hours(d, city_tz=city_tz)
-                if h is not None and 0 < h < 6:
-                    settling.append((city, d, h))
+        """讀 signal_summary.json 的 settling 組顯示結算中頁面（fallback：掃描 CSV）。"""
+        summary = _read_signal_summary()
+        if summary:
+            # 快速路徑：讀預計算 JSON（< 1ms）
+            settling_groups = summary.get("settling", [])
+            if not settling_groups:
+                await update.message.reply_text(
+                    "<b>結算中</b>\n目前沒有即將結算的合約",
+                    parse_mode="HTML",
+                )
+                return
+            for entry in settling_groups:
+                msg = self._render_settling_page(
+                    entry["city"],
+                    entry["market_date"],
+                    entry["hours_to_settlement"],
+                    preloaded_rows=entry.get("rows", []),
+                )
+                await update.message.reply_text(msg, parse_mode="HTML")
+        else:
+            # Fallback：signal_summary 不存在時掃 CSV
+            settling: list[tuple[str, str, float]] = []
+            for city in self.reader.get_ready_cities():
+                city_tz = self.reader.get_city_timezone(city)
+                for d in self.reader.get_available_dates(city):
+                    h = _calc_settlement_hours(d, city_tz=city_tz)
+                    if h is not None and 0 < h < 6:
+                        settling.append((city, d, h))
+            if not settling:
+                await update.message.reply_text(
+                    "<b>結算中</b>\n目前沒有即將結算的合約",
+                    parse_mode="HTML",
+                )
+                return
+            settling.sort(key=lambda x: x[2])
+            for city, market_date, hours in settling:
+                msg = self._render_settling_page(city, market_date, hours)
+                await update.message.reply_text(msg, parse_mode="HTML")
 
-        if not settling:
-            await update.message.reply_text(
-                "🔴 <b>結算中</b>\n目前沒有即將結算的合約",
-                parse_mode="HTML",
-            )
-            return
+    def _render_settling_page(
+        self,
+        city: str,
+        market_date: str,
+        hours: float,
+        preloaded_rows: "list[dict] | None" = None,
+    ) -> str:
+        """渲染單一城市的結算中頁面。
 
-        settling.sort(key=lambda x: x[2])  # 剩餘時間由少到多
-
-        for city, market_date, hours in settling:
-            msg = self._render_settling_page(city, market_date, hours)
-            await update.message.reply_text(msg, parse_mode="HTML")
-
-    def _render_settling_page(self, city: str, market_date: str, hours: float) -> str:
-        """渲染單一城市的結算中頁面。"""
+        preloaded_rows: 若傳入則直接使用（來自 signal_summary.json），否則讀 CSV。
+        """
         city_tz = self.reader.get_city_timezone(city)
         settlement_taipei = _calc_settlement_taipei(market_date, city_tz)
-        rows = self.reader.get_city_signals(city, market_date)
+        rows = preloaded_rows if preloaded_rows is not None else self.reader.get_city_signals(city, market_date)
 
         # 結算倒數顯示
         if hours < 1:
@@ -1895,7 +1974,7 @@ class WeatherSignalBot:
         else:
             hrs_display = f"{int(hours)}小時"
 
-        header = f"🔴 結算中 — <b>{city}</b> · {_fmt_date(market_date)}\n"
+        header = f"結算中 — <b>{city}</b> · {_fmt_date(market_date)}\n"
         header += f"結算倒數：{hrs_display}"
         if settlement_taipei:
             header += f"（台北 {settlement_taipei} 結算）"
@@ -1968,11 +2047,11 @@ class WeatherSignalBot:
                 temp = _fmt_contract_temp(r)
                 yes_ask = _safe_float(r.get("yes_ask_price"), None)
                 no_ask = _safe_float(r.get("no_ask_price"), None)
-                y = f"Y${yes_ask:.2f}" if yes_ask is not None else "Y—"
-                n = f"N${no_ask:.2f}" if no_ask is not None else "N—"
+                y = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
+                n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
                 reason = r.get("clip_reason", "")
                 reason_str = f"  ({reason})" if reason else ""
-                body += f"  {temp}  {y}  {n}{reason_str}\n"
+                body += f"  {temp}  {y} / {n}{reason_str}\n"
 
         if unlocked:
             body += "\n⏳ 未鎖定：\n"
@@ -1981,13 +2060,13 @@ class WeatherSignalBot:
                 p_yes_raw = r.get("p_yes", "")
                 yes_ask = _safe_float(r.get("yes_ask_price"), None)
                 no_ask = _safe_float(r.get("no_ask_price"), None)
-                y = f"Y${yes_ask:.2f}" if yes_ask is not None else "Y—"
-                n = f"N${no_ask:.2f}" if no_ask is not None else "N—"
+                y = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
+                n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
                 try:
-                    p_str = f"p{float(p_yes_raw)*100:.0f}%  " if p_yes_raw not in ("", None) else ""
+                    p_str = f"模型{float(p_yes_raw)*100:.0f}%  " if p_yes_raw not in ("", None) else ""
                 except (ValueError, TypeError):
                     p_str = ""
-                body += f"  {temp}  {p_str}{y}  {n}\n"
+                body += f"  {temp}  {p_str}{y} / {n}\n"
 
         result = header + body
         if len(result) > 4000:
