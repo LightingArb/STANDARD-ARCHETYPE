@@ -1,0 +1,408 @@
+{
+  "_meta": {
+    "description": "半靜態城市 metadata seed（station_code / timezone / lat / lon / settlement 等）",
+    "source": "萃取自 city_mapping_v2.json + cities_33.json + city_scope.py + 01_city_manual.csv",
+    "last_updated": "2026-04-05"
+  },
+  "Amsterdam": {
+    "country": "NL", "lat": 52.3081, "lon": 4.7642,
+    "station_code": "EHAM", "timezone": "Europe/Amsterdam",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/nl/amsterdam/EHAM",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Ankara": {
+    "country": "TR", "lat": 40.1281, "lon": 32.9951,
+    "station_code": "LTAC", "timezone": "Europe/Istanbul",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/tr/%C3%A7ubuk/LTAC",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Atlanta": {
+    "country": "US", "lat": 33.6367, "lon": -84.4281,
+    "station_code": "KATL", "timezone": "America/New_York",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/ga/atlanta/KATL",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Austin": {
+    "country": "US", "lat": 30.1945, "lon": -97.6699,
+    "station_code": "KAUS", "timezone": "America/Chicago",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/tx/austin/KAUS",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Beijing": {
+    "country": "CN", "lat": 40.0799, "lon": 116.6031,
+    "station_code": "ZBAA", "timezone": "Asia/Shanghai",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/cn/beijing/ZBAA",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Buenos Aires": {
+    "country": "AR", "lat": -34.8222, "lon": -58.5358,
+    "station_code": "SAEZ", "timezone": "America/Argentina/Buenos_Aires",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/ar/ezeiza/SAEZ",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Busan": {
+    "country": "KR", "lat": 35.1796, "lon": 128.9384,
+    "station_code": "RKPK", "timezone": "Asia/Seoul",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/kr/busan/RKPK",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Chengdu": {
+    "country": "CN", "lat": 30.5785, "lon": 103.9471,
+    "station_code": "ZUUU", "timezone": "Asia/Shanghai",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/cn/chengdu/ZUUU",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Chicago": {
+    "country": "US", "lat": 41.9742, "lon": -87.9073,
+    "station_code": "KORD", "timezone": "America/Chicago",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/il/chicago/KORD",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Chongqing": {
+    "country": "CN", "lat": 29.7192, "lon": 106.6414,
+    "station_code": "ZUCK", "timezone": "Asia/Shanghai",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/cn/chongqing/ZUCK",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "validated_hourly_fallback",
+    "city_enabled": true
+  },
+  "Dallas": {
+    "country": "US", "lat": 32.8471, "lon": -96.8518,
+    "station_code": "KDAL", "timezone": "America/Chicago",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/tx/dallas/KDAL",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Denver": {
+    "country": "US", "lat": 39.7017, "lon": -104.7517,
+    "station_code": "KBKF", "timezone": "America/Denver",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/co/aurora/KBKF",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Helsinki": {
+    "country": "FI", "lat": 60.3172, "lon": 24.9633,
+    "station_code": "EFHK", "timezone": "Europe/Helsinki",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/fi/vantaa/EFHK",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+    "Hong Kong": {
+      "country": "HK", "lat": 22.3193, "lon": 114.1694,
+      "station_code": "VHHH", "timezone": "Asia/Hong_Kong",
+      "settlement_source_type": "HKO",
+      "settlement_url": "https://www.weather.gov.hk/en/cis/climat.htm",
+      "precision": "0.1C", "unit": "C",
+      "truth_mode": "official_daily_summary",
+      "city_enabled": false,
+      "deferred_reason": "HKO settlement path not implemented yet"
+    },
+  "Houston": {
+    "country": "US", "lat": 29.6454, "lon": -95.2789,
+    "station_code": "KHOU", "timezone": "America/Chicago",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/tx/houston/KHOU",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Istanbul": {
+    "country": "TR", "lat": 41.2608, "lon": 28.7426,
+    "station_code": "LTFM", "timezone": "Europe/Istanbul",
+    "settlement_source_type": "NOAA",
+    "settlement_url": "https://www.weather.gov/wrh/timeseries?site=LTFM",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": false,
+    "deferred_reason": "NOAA 結算，WU settlement 支線未補"
+  },
+  "Jakarta": {
+    "country": "ID", "lat": -6.1256, "lon": 106.6558,
+    "station_code": "WIHH", "timezone": "Asia/Jakarta",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/id/tangerang/WIHH",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Kuala Lumpur": {
+    "country": "MY", "lat": 2.7456, "lon": 101.7099,
+    "station_code": "WMKK", "timezone": "Asia/Kuala_Lumpur",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/my/sepang/WMKK",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "London": {
+    "country": "GB", "lat": 51.5048, "lon": 0.0495,
+    "station_code": "EGLC", "timezone": "Europe/London",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/gb/london/EGLC",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Los Angeles": {
+    "country": "US", "lat": 33.9425, "lon": -118.4081,
+    "station_code": "KLAX", "timezone": "America/Los_Angeles",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Lucknow": {
+    "country": "IN", "lat": 26.7606, "lon": 80.8893,
+    "station_code": "VILK", "timezone": "Asia/Kolkata",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/in/lucknow/VILK",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "validated_hourly_fallback",
+    "city_enabled": true
+  },
+  "Madrid": {
+    "country": "ES", "lat": 40.4936, "lon": -3.5668,
+    "station_code": "LEMD", "timezone": "Europe/Madrid",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/es/madrid/LEMD",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Mexico City": {
+    "country": "MX", "lat": 19.4363, "lon": -99.0721,
+    "station_code": "MMMX", "timezone": "America/Mexico_City",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/mx/mexico-city/MMMX",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Miami": {
+    "country": "US", "lat": 25.7959, "lon": -80.287,
+    "station_code": "KMIA", "timezone": "America/New_York",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/fl/miami/KMIA",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Milan": {
+    "country": "IT", "lat": 45.6306, "lon": 8.7231,
+    "station_code": "LIMC", "timezone": "Europe/Rome",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/it/milan/LIMC",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Moscow": {
+    "country": "RU", "lat": 55.5914, "lon": 37.2615,
+    "station_code": "UUWW", "timezone": "Europe/Moscow",
+    "settlement_source_type": "NOAA",
+    "settlement_url": "https://www.weather.gov/wrh/timeseries?site=UUWW",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": false,
+    "deferred_reason": "NOAA 結算，WU settlement 支線未補"
+  },
+  "Munich": {
+    "country": "DE", "lat": 48.3538, "lon": 11.7861,
+    "station_code": "EDDM", "timezone": "Europe/Berlin",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/de/munich/EDDM",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "New York City": {
+    "country": "US", "lat": 40.7772, "lon": -73.8726,
+    "station_code": "KLGA", "timezone": "America/New_York",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Panama City": {
+    "country": "PA", "lat": 9.0714, "lon": -79.3835,
+    "station_code": "MPMG", "timezone": "America/Panama",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/pa/tocumen/MPMG",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Paris": {
+    "country": "FR", "lat": 49.0097, "lon": 2.5479,
+    "station_code": "LFPG", "timezone": "Europe/Paris",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/fr/paris/LFPG",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "San Francisco": {
+    "country": "US", "lat": 37.6213, "lon": -122.379,
+    "station_code": "KSFO", "timezone": "America/Los_Angeles",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/ca/san-francisco/KSFO",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Sao Paulo": {
+    "country": "BR", "lat": -23.4356, "lon": -46.4731,
+    "station_code": "SBGR", "timezone": "America/Sao_Paulo",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/br/guarulhos/SBGR",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Seattle": {
+    "country": "US", "lat": 47.4502, "lon": -122.3088,
+    "station_code": "KSEA", "timezone": "America/Los_Angeles",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/us/wa/seatac/KSEA",
+    "precision": "1F", "unit": "F",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Seoul": {
+    "country": "KR", "lat": 37.4691, "lon": 126.4505,
+    "station_code": "RKSI", "timezone": "Asia/Seoul",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/kr/incheon/RKSI",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "validated_hourly_fallback",
+    "city_enabled": true
+  },
+  "Shanghai": {
+    "country": "CN", "lat": 31.1434, "lon": 121.8052,
+    "station_code": "ZSPD", "timezone": "Asia/Shanghai",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/cn/shanghai/ZSPD",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Shenzhen": {
+    "country": "CN", "lat": 22.6393, "lon": 113.8107,
+    "station_code": "ZGSZ", "timezone": "Asia/Shanghai",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/cn/shenzhen/ZGSZ",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "validated_hourly_fallback",
+    "city_enabled": true
+  },
+  "Singapore": {
+    "country": "SG", "lat": 1.3502, "lon": 103.9944,
+    "station_code": "WSSS", "timezone": "Asia/Singapore",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/sg/singapore/WSSS",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Taipei": {
+    "country": "TW", "lat": 25.0777, "lon": 121.233,
+    "station_code": "RCTP", "timezone": "Asia/Taipei",
+    "settlement_source_type": "NOAA",
+    "settlement_url": "https://www.weather.gov/wrh/timeseries?site=RCTP",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": false,
+    "deferred_reason": "雙結算來源（NOAA+WU），secondary WU 規則未定"
+  },
+  "Tel Aviv": {
+    "country": "IL", "lat": 32.0114, "lon": 34.8867,
+    "station_code": "LLBG", "timezone": "Asia/Jerusalem",
+    "settlement_source_type": "NOAA",
+    "settlement_url": "https://www.weather.gov/wrh/timeseries?site=LLBG",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": false,
+    "deferred_reason": "NOAA 結算，WU settlement 支線未補"
+  },
+  "Tokyo": {
+    "country": "JP", "lat": 35.5533, "lon": 139.7811,
+    "station_code": "RJTT", "timezone": "Asia/Tokyo",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/jp/tokyo/RJTT",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Toronto": {
+    "country": "CA", "lat": 43.6772, "lon": -79.6306,
+    "station_code": "CYYZ", "timezone": "America/Toronto",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/ca/mississauga/CYYZ",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Warsaw": {
+    "country": "PL", "lat": 52.1657, "lon": 20.9671,
+    "station_code": "EPWA", "timezone": "Europe/Warsaw",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/pl/warsaw/EPWA",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "official_daily_summary",
+    "city_enabled": true
+  },
+  "Wellington": {
+    "country": "NZ", "lat": -41.3272, "lon": 174.8053,
+    "station_code": "NZWN", "timezone": "Pacific/Auckland",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/nz/wellington/NZWN",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "validated_hourly_fallback",
+    "city_enabled": true
+  },
+  "Wuhan": {
+    "country": "CN", "lat": 30.7838, "lon": 114.2081,
+    "station_code": "ZHHH", "timezone": "Asia/Shanghai",
+    "settlement_source_type": "WU",
+    "settlement_url": "https://www.wunderground.com/history/daily/cn/wuhan/ZHHH",
+    "precision": "1C", "unit": "C",
+    "truth_mode": "validated_hourly_fallback",
+    "city_enabled": true
+  }
+}

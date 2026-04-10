@@ -1,0 +1,40 @@
+{
+  "schema_version": "positions_v1",
+  "updated_at_utc": "2026-04-09T09:01:38Z",
+  "positions": [
+    {
+      "position_id": "pos_20260409_002246_47x",
+      "market_id": "1871609",
+      "token_id": "",
+      "city": "Paris",
+      "market_date": "2026-04-09",
+      "contract_label": "23.0",
+      "side": "NO",
+      "entry_price": 0.02,
+      "shares": 50.0,
+      "entry_fee_per_share": 7e-05,
+      "entry_cost_total": 1.0035,
+      "entry_time_utc": "2026-04-09T00:22:46Z",
+      "entry_edge": 0.193184,
+      "entry_ev": 0.193114,
+      "entry_signal_action": "BUY_NO",
+      "status": "open",
+      "mark_price": 0.008,
+      "current_edge": 0.199184,
+      "current_ev": 0.199143,
+      "unrealized_pnl_gross": -0.6035,
+      "unrealized_pnl_net": -0.604391,
+      "last_checked_utc": "2026-04-09T09:01:38Z",
+      "exit_reason": null,
+      "exit_time_utc": null,
+      "exit_price": null,
+      "exit_fee_estimate": null,
+      "exit_signal_action_at_close": null,
+      "close_method": null,
+      "pnl_gross": null,
+      "pnl_net": null,
+      "status_reason": null,
+      "notes": ""
+    }
+  ]
+}

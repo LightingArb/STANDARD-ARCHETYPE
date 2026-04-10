@@ -1,0 +1,29 @@
+{
+  "collector_main": {
+    "status": "running",
+    "pid": 55104,
+    "last_truth_utc": "2026-04-08T22:32:49Z",
+    "last_error": null,
+    "updated_at_utc": "2026-04-08T22:32:49Z"
+  },
+  "updated_at_utc": "2026-04-09T09:01:38Z",
+  "signal_main": {
+    "status": "running",
+    "price_mode": "rest",
+    "pid": 60708,
+    "last_success_utc": "2026-04-09T09:01:38Z",
+    "last_cycle_duration_ms": 20031,
+    "consecutive_failures": 0,
+    "last_error": null,
+    "ws_connected": false,
+    "ws_fallback_active": false,
+    "ready_city_count": 2,
+    "updated_at_utc": "2026-04-09T09:01:38Z"
+  },
+  "telegram_bot": {
+    "status": "running",
+    "pid": 61172,
+    "last_callback_utc": "2026-04-09T03:20:36Z",
+    "updated_at_utc": "2026-04-09T03:20:36Z"
+  }
+}

@@ -1,0 +1,33 @@
+# trading_params.yaml — Polymarket 交易參數
+
+# Fee 定案（2026-04-08）
+# 來源：https://docs.polymarket.com/trading/fees（Upcoming Fee Structure，2026-03-30 生效）
+# Weather 行：fee_rate=0.025, exponent=0.5, maker_rebate=25%
+# 數學驗算：3 筆官方費率表數字（p=0.10/0.50/0.90）全部吻合
+# API /fee-rate 回傳 base_fee=1000（簽名用 bps，非 EV 計算用 feeRate）
+fee_mode: manual_hardcoded
+fee_basis: official_docs_2026_04_08
+fee_rate: 0.025        # Weather taker fee rate（已定案，官方費率表驗證）
+fee_exponent: 0.5      # fee 公式指數（已定案）
+fee_maker: 0           # Maker 不收 fee
+fee_maker_rebate: 0.25 # Maker rebate = taker fee 的 25%
+
+min_edge: 0.03        # 最小進場門檻
+kelly_fraction: 0.25  # 1/4 Kelly
+bankroll: 10000       # 用於計算 Kelly 下注金額（紙上交易用）
+hurdle_rate: 0        # per-hour reinvestment yield（第一版設 0，不折現）
+
+# STEP 9 深度分析參數
+depth_fixed_usd: 200        # fixed_depth 模式預設金額（分析用，非 alert 門檻）
+depth_ema_alpha: 0.3         # EMA 平滑係數（預留，第一版不啟用）
+depth_ema_enabled: false     # EMA 是否啟用（第一版 false）
+
+# STEP 10 通報設定
+alert_min_edge: 0.30               # 最小進場 edge（基礎條件）
+alert_min_depth_usd: 100           # 最小 sweet_spot 深度（USD）
+alert_require_positive_ev: true    # 要求 sweet_spot_ev > 0
+alert_cooldown_minutes: 10         # 同一 (market_id, signal_action) 的最短間隔（分鐘）
+alert_min_settlement_hours: 2      # 距結算最少小時數
+alert_max_per_city_per_cycle: 3    # 每城市每輪最多推送筆數
+alert_max_total_per_cycle: 10      # 每輪全局最多推送筆數
+alert_cities: all_ready            # "all_ready"（目前唯一支援值）

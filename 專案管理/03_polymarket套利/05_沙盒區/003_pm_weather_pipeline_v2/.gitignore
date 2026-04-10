@@ -1,0 +1,27 @@
+# Raw data (large, machine-specific)
+data/raw/
+data/processed/
+data/models/
+data/results/
+
+# Generated outputs (re-run to regenerate)
+data/dashboard_*.html
+data/display_data.json
+data/_run_*.json
+data/_run_*.txt
+
+# Probe cache
+data/raw/D/*/gfs_seamless/probe_earliest_date.json
+
+# API keys
+config/wu_api_key.txt
+config/telegram.yaml
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env

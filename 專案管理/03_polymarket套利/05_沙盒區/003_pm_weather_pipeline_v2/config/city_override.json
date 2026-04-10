@@ -1,0 +1,7 @@
+{
+  "_meta": {
+    "description": "城市 metadata 人工覆蓋檔。此檔案中的值會覆蓋 seed_cities.json 的對應欄位。",
+    "usage": "如需覆蓋某城市的 station_code 或 timezone，在此新增對應 key。",
+    "last_updated": "2026-04-05"
+  }
+}
