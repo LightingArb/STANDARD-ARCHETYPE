@@ -908,8 +908,12 @@ class WeatherSignalBot:
                     # 無掛單：無價格行
                     line = f"{temp_str}  無掛單"
                 elif row_status == "market_extreme":
-                    # 市場極端：顯示價格
-                    line = f"{temp_str}  市場極端{price_line}"
+                    # 幾乎確定：依價格方向判斷
+                    if no_ask is not None and yes_ask is not None and no_ask > yes_ask:
+                        certain_str = "幾乎確定NO"
+                    else:
+                        certain_str = "幾乎確定YES"
+                    line = f"{temp_str}  {certain_str}{price_line}"
                 else:
                     # 正常：依 edge 判斷
                     best_e = max(yes_e, no_e)
@@ -922,7 +926,7 @@ class WeatherSignalBot:
 
                 rows_text.append(line)
 
-            body = "\n".join(rows_text)
+            body = "\n\n".join(rows_text)
 
         text = header + "\n\n" + body
 
@@ -2057,22 +2061,44 @@ class WeatherSignalBot:
                 n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
                 reason = r.get("clip_reason", "")
                 reason_str = f"  {reason}" if reason else ""
-                body += f"  {temp}{reason_str}  {y} / {n}\n"
+                body += f"  {temp}{reason_str}\n    {y} / {n}\n\n"
 
         if unlocked:
             body += "\n未鎖定：\n"
             for r in unlocked:
                 temp = _fmt_contract_temp(r)
-                p_yes_raw = r.get("p_yes", "")
                 yes_ask = _safe_float(r.get("yes_ask_price"), None)
                 no_ask = _safe_float(r.get("no_ask_price"), None)
+                row_status = r.get("signal_status", "")
+                yes_e = _safe_float(r.get("yes_edge"), 0.0) or 0.0
+                no_e = _safe_float(r.get("no_edge"), 0.0) or 0.0
+
+                if yes_ask is None and no_ask is None:
+                    status_str = "無掛單"
+                    show_price = False
+                elif row_status == "stale_price":
+                    status_str = "價格過時"
+                    show_price = False
+                elif row_status == "market_extreme":
+                    if no_ask is not None and yes_ask is not None and no_ask > yes_ask:
+                        status_str = "幾乎確定NO"
+                    else:
+                        status_str = "幾乎確定YES"
+                    show_price = True
+                else:
+                    best_e = max(yes_e, no_e)
+                    if best_e > 0.001:
+                        status_str = f"YES▲+{best_e*100:.1f}%" if yes_e >= no_e else f"NO▲+{best_e*100:.1f}%"
+                    else:
+                        status_str = "無優勢"
+                    show_price = True
+
                 y = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
                 n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
-                try:
-                    p_str = f"模型{float(p_yes_raw)*100:.0f}%  " if p_yes_raw not in ("", None) else ""
-                except (ValueError, TypeError):
-                    p_str = ""
-                body += f"  {temp}  {p_str}{y} / {n}\n"
+                body += f"  {temp}  {status_str}\n"
+                if show_price:
+                    body += f"    {y} / {n}\n"
+                body += "\n"
 
         result = header + body
         if len(result) > 4000:
