@@ -433,20 +433,34 @@ def _read_signal_summary() -> dict:
         return {}
 
 
-def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
-    """回傳峰值時段字串。無資料或解析失敗回傳空字串。
+_MONTH_TO_SEASON = {
+    1: "winter", 2: "winter", 3: "spring",
+    4: "spring", 5: "spring", 6: "summer",
+    7: "summer", 8: "summer", 9: "autumn",
+    10: "autumn", 11: "autumn", 12: "winter",
+}
 
-    當天：「峰值：台北HH:MM-HH:MM ⏳/🔥/✅」
-    其他日：「峰值時段：台北HH:MM-HH:MM（當地HH:00-HH:00）」
+
+def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
+    """回傳峰值時段字串（schema_version=2，按季節）。無資料或解析失敗回傳空字串。
+
+    當天：「預報峰值窗：台北HH:MM-HH:MM ⏳/🔥/✅」
+    其他日：「預報峰值窗：台北HH:MM-HH:MM」
     """
     city_data = _peak_hours.get(city, {})
-    if not city_data:
+    if not city_data or not isinstance(city_data, dict):
+        return ""
+    seasons = city_data.get("seasons", {})
+    if not seasons:
         return ""
     try:
-        month = str(int(market_date_str[5:7]))
+        month = int(market_date_str[5:7])
     except Exception:
         return ""
-    peak = city_data.get(month)
+    season = _MONTH_TO_SEASON.get(month)
+    if not season:
+        return ""
+    peak = seasons.get(season)
     if not peak:
         return ""
     start_local = int(peak["start"])
@@ -469,9 +483,9 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
                 status = "🔥峰值中"
             else:
                 status = "✅已過峰值"
-            return f"峰值：台北{start_taipei}-{end_taipei} {status}"
+            return f"預報峰值窗：台北{start_taipei}-{end_taipei} {status}"
         else:
-            return f"峰值時段：台北{start_taipei}-{end_taipei}（當地{start_local:02d}:00-{end_local:02d}:00）"
+            return f"預報峰值窗：台北{start_taipei}-{end_taipei}"
     except Exception:
         return ""
 

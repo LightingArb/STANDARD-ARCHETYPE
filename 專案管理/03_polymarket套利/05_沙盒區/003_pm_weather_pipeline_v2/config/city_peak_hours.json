@@ -1,0 +1,630 @@
+{
+  "schema_version": 2,
+  "method": "seasonal_p25_p75",
+  "min_days": 365,
+  "generated_at": "2026-04-10T19:22:37Z",
+  "Ankara": {
+    "total_days": 798,
+    "timezone": "Europe/Istanbul",
+    "seasons": {
+      "spring": {
+        "start": 14,
+        "end": 16,
+        "n": 223
+      },
+      "summer": {
+        "start": 15,
+        "end": 16,
+        "n": 184
+      },
+      "autumn": {
+        "start": 14,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 14,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "Atlanta": {
+    "total_days": 803,
+    "timezone": "America/New_York",
+    "seasons": {
+      "spring": {
+        "start": 16,
+        "end": 17,
+        "n": 228
+      },
+      "summer": {
+        "start": 15,
+        "end": 17,
+        "n": 184
+      },
+      "autumn": {
+        "start": 15,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 15,
+        "end": 17,
+        "n": 209
+      }
+    }
+  },
+  "Austin": {
+    "total_days": 798,
+    "timezone": "America/Chicago",
+    "seasons": {
+      "spring": {
+        "start": 16,
+        "end": 17,
+        "n": 223
+      },
+      "summer": {
+        "start": 16,
+        "end": 17,
+        "n": 184
+      },
+      "autumn": {
+        "start": 16,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 16,
+        "end": 17,
+        "n": 209
+      }
+    }
+  },
+  "Beijing": {
+    "total_days": 632,
+    "timezone": "Asia/Shanghai",
+    "seasons": {
+      "spring": {
+        "start": 15,
+        "end": 16,
+        "n": 184
+      },
+      "summer": {
+        "start": 13,
+        "end": 16,
+        "n": 184
+      },
+      "autumn": {
+        "start": 13,
+        "end": 15,
+        "n": 145
+      },
+      "winter": {
+        "start": 14,
+        "end": 16,
+        "n": 119
+      }
+    }
+  },
+  "Chongqing": {
+    "total_days": 611,
+    "timezone": "Asia/Shanghai",
+    "seasons": {
+      "spring": {
+        "start": 13,
+        "end": 16,
+        "n": 184
+      },
+      "summer": {
+        "start": 14,
+        "end": 16,
+        "n": 184
+      },
+      "autumn": {
+        "start": 13,
+        "end": 16,
+        "n": 124
+      },
+      "winter": {
+        "start": 10,
+        "end": 16,
+        "n": 119
+      }
+    }
+  },
+  "Denver": {
+    "total_days": 798,
+    "timezone": "America/Denver",
+    "seasons": {
+      "spring": {
+        "start": 15,
+        "end": 16,
+        "n": 223
+      },
+      "summer": {
+        "start": 14,
+        "end": 16,
+        "n": 184
+      },
+      "autumn": {
+        "start": 14,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 14,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "Helsinki": {
+    "total_days": 798,
+    "timezone": "Europe/Helsinki",
+    "seasons": {
+      "spring": {
+        "start": 14,
+        "end": 16,
+        "n": 223
+      },
+      "summer": {
+        "start": 14,
+        "end": 16,
+        "n": 184
+      },
+      "autumn": {
+        "start": 13,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 7,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "Houston": {
+    "total_days": 798,
+    "timezone": "America/Chicago",
+    "seasons": {
+      "spring": {
+        "start": 14,
+        "end": 16,
+        "n": 223
+      },
+      "summer": {
+        "start": 14,
+        "end": 16,
+        "n": 184
+      },
+      "autumn": {
+        "start": 14,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 15,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "London": {
+    "total_days": 803,
+    "timezone": "Europe/London",
+    "seasons": {
+      "spring": {
+        "start": 14,
+        "end": 15,
+        "n": 228
+      },
+      "summer": {
+        "start": 14,
+        "end": 16,
+        "n": 184
+      },
+      "autumn": {
+        "start": 13,
+        "end": 15,
+        "n": 182
+      },
+      "winter": {
+        "start": 14,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "Madrid": {
+    "total_days": 798,
+    "timezone": "Europe/Madrid",
+    "seasons": {
+      "spring": {
+        "start": 16,
+        "end": 18,
+        "n": 223
+      },
+      "summer": {
+        "start": 17,
+        "end": 19,
+        "n": 184
+      },
+      "autumn": {
+        "start": 16,
+        "end": 18,
+        "n": 182
+      },
+      "winter": {
+        "start": 16,
+        "end": 17,
+        "n": 209
+      }
+    }
+  },
+  "Mexico City": {
+    "total_days": 798,
+    "timezone": "America/Mexico_City",
+    "seasons": {
+      "spring": {
+        "start": 15,
+        "end": 16,
+        "n": 223
+      },
+      "summer": {
+        "start": 14,
+        "end": 15,
+        "n": 184
+      },
+      "autumn": {
+        "start": 14,
+        "end": 15,
+        "n": 182
+      },
+      "winter": {
+        "start": 15,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "Miami": {
+    "total_days": 463,
+    "timezone": "America/New_York",
+    "seasons": {
+      "spring": {
+        "start": 13,
+        "end": 15,
+        "n": 131
+      },
+      "summer": {
+        "start": 13,
+        "end": 15,
+        "n": 92
+      },
+      "autumn": {
+        "start": 13,
+        "end": 15,
+        "n": 91
+      },
+      "winter": {
+        "start": 14,
+        "end": 15,
+        "n": 149
+      }
+    }
+  },
+  "Milan": {
+    "total_days": 798,
+    "timezone": "Europe/Rome",
+    "seasons": {
+      "spring": {
+        "start": 15,
+        "end": 16,
+        "n": 223
+      },
+      "summer": {
+        "start": 15,
+        "end": 16,
+        "n": 184
+      },
+      "autumn": {
+        "start": 15,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 15,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "Munich": {
+    "total_days": 403,
+    "timezone": "Europe/Berlin",
+    "seasons": {
+      "spring": {
+        "start": 15,
+        "end": 16,
+        "n": 101
+      },
+      "summer": {
+        "start": 15,
+        "end": 17,
+        "n": 92
+      },
+      "autumn": {
+        "start": 14,
+        "end": 15,
+        "n": 91
+      },
+      "winter": {
+        "start": 14,
+        "end": 15,
+        "n": 119
+      }
+    }
+  },
+  "Panama City": {
+    "total_days": 562,
+    "timezone": "America/Panama",
+    "seasons": {
+      "spring": {
+        "start": 12,
+        "end": 13,
+        "n": 184
+      },
+      "summer": {
+        "start": 12,
+        "end": 14,
+        "n": 168
+      },
+      "autumn": {
+        "start": 11,
+        "end": 13,
+        "n": 91
+      },
+      "winter": {
+        "start": 12,
+        "end": 13,
+        "n": 119
+      }
+    }
+  },
+  "Paris": {
+    "total_days": 803,
+    "timezone": "Europe/Paris",
+    "seasons": {
+      "spring": {
+        "start": 15,
+        "end": 17,
+        "n": 228
+      },
+      "summer": {
+        "start": 16,
+        "end": 17,
+        "n": 184
+      },
+      "autumn": {
+        "start": 14,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 15,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "San Francisco": {
+    "total_days": 803,
+    "timezone": "America/Los_Angeles",
+    "seasons": {
+      "spring": {
+        "start": 13,
+        "end": 15,
+        "n": 228
+      },
+      "summer": {
+        "start": 13,
+        "end": 15,
+        "n": 184
+      },
+      "autumn": {
+        "start": 13,
+        "end": 15,
+        "n": 182
+      },
+      "winter": {
+        "start": 14,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "Sao Paulo": {
+    "total_days": 803,
+    "timezone": "America/Sao_Paulo",
+    "seasons": {
+      "spring": {
+        "start": 13,
+        "end": 14,
+        "n": 228
+      },
+      "summer": {
+        "start": 14,
+        "end": 15,
+        "n": 184
+      },
+      "autumn": {
+        "start": 13,
+        "end": 14,
+        "n": 182
+      },
+      "winter": {
+        "start": 13,
+        "end": 14,
+        "n": 209
+      }
+    }
+  },
+  "Seattle": {
+    "total_days": 803,
+    "timezone": "America/Los_Angeles",
+    "seasons": {
+      "spring": {
+        "start": 15,
+        "end": 17,
+        "n": 228
+      },
+      "summer": {
+        "start": 16,
+        "end": 17,
+        "n": 184
+      },
+      "autumn": {
+        "start": 14,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 14,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "Seoul": {
+    "total_days": 803,
+    "timezone": "Asia/Seoul",
+    "seasons": {
+      "spring": {
+        "start": 13,
+        "end": 17,
+        "n": 228
+      },
+      "summer": {
+        "start": 15,
+        "end": 17,
+        "n": 184
+      },
+      "autumn": {
+        "start": 13,
+        "end": 19,
+        "n": 182
+      },
+      "winter": {
+        "start": 7,
+        "end": 20,
+        "n": 209
+      }
+    }
+  },
+  "Shanghai": {
+    "total_days": 798,
+    "timezone": "Asia/Shanghai",
+    "seasons": {
+      "spring": {
+        "start": 12,
+        "end": 14,
+        "n": 223
+      },
+      "summer": {
+        "start": 12,
+        "end": 14,
+        "n": 184
+      },
+      "autumn": {
+        "start": 11,
+        "end": 13,
+        "n": 182
+      },
+      "winter": {
+        "start": 12,
+        "end": 14,
+        "n": 209
+      }
+    }
+  },
+  "Shenzhen": {
+    "total_days": 803,
+    "timezone": "Asia/Shanghai",
+    "seasons": {
+      "spring": {
+        "start": 13,
+        "end": 15,
+        "n": 228
+      },
+      "summer": {
+        "start": 13,
+        "end": 14,
+        "n": 184
+      },
+      "autumn": {
+        "start": 13,
+        "end": 15,
+        "n": 182
+      },
+      "winter": {
+        "start": 14,
+        "end": 16,
+        "n": 209
+      }
+    }
+  },
+  "Tokyo": {
+    "total_days": 724,
+    "timezone": "Asia/Tokyo",
+    "seasons": {
+      "spring": {
+        "start": 13,
+        "end": 15,
+        "n": 184
+      },
+      "summer": {
+        "start": 13,
+        "end": 15,
+        "n": 184
+      },
+      "autumn": {
+        "start": 13,
+        "end": 15,
+        "n": 182
+      },
+      "winter": {
+        "start": 14,
+        "end": 16,
+        "n": 174
+      }
+    }
+  },
+  "Toronto": {
+    "total_days": 799,
+    "timezone": "America/Toronto",
+    "seasons": {
+      "spring": {
+        "start": 13,
+        "end": 17,
+        "n": 224
+      },
+      "summer": {
+        "start": 14,
+        "end": 16,
+        "n": 184
+      },
+      "autumn": {
+        "start": 14,
+        "end": 16,
+        "n": 182
+      },
+      "winter": {
+        "start": 13,
+        "end": 16,
+        "n": 209
+      }
+    }
+  }
+}
