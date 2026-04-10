@@ -922,7 +922,7 @@ class WeatherSignalBot:
                 else:
                     depth = 0.0
 
-                # 6 種狀態分類
+                # 狀態分類 + 模型機率
                 clipped = str(row.get("observation_clipped", "")).lower() == "true"
                 row_status = row.get("signal_status", "")
 
@@ -931,31 +931,25 @@ class WeatherSignalBot:
                 d_str = f"  D${depth:.0f}" if depth and depth > 0 else ""
                 price_line = f"\n  {y_str} / {n_str}{d_str}"
 
+                # 模型方向與機率
+                p_yes = _safe_float(row.get("p_yes"))
+                p_no = 1 - p_yes
+                model_str = f"模型YES {p_yes*100:.0f}%" if p_yes >= p_no else f"模型NO {p_no*100:.0f}%"
+
                 if clipped:
-                    # 已鎖定：無價格行
                     line = f"{temp_str}  已鎖定（已超過）"
-                elif row_status == "stale_price":
-                    # 價格過時：無價格行
-                    line = f"{temp_str}  價格過時"
-                elif yes_ask is None and no_ask is None:
-                    # 無掛單：無價格行
-                    line = f"{temp_str}  無掛單"
+                elif row_status == "stale_price" or (yes_ask is None and no_ask is None):
+                    line = f"{temp_str}  {model_str}  無掛單"
                 elif row_status == "market_extreme":
-                    # 幾乎確定：依價格方向判斷
-                    if no_ask is not None and yes_ask is not None and no_ask > yes_ask:
-                        certain_str = "幾乎確定NO"
-                    else:
-                        certain_str = "幾乎確定YES"
-                    line = f"{temp_str}  {certain_str}{price_line}"
+                    line = f"{temp_str}  {model_str}{price_line}"
                 else:
-                    # 正常：依 edge 判斷
                     best_e = max(yes_e, no_e)
+                    warn_tag = " ⚠️最後預報" if row_status == "last_forecast_warning" else ""
                     if best_e > 0.001:
                         edge_str = f"YES▲+{best_e*100:.1f}%" if yes_e >= no_e else f"NO▲+{best_e*100:.1f}%"
+                        line = f"{temp_str}  {model_str}  {edge_str}{warn_tag}{price_line}"
                     else:
-                        edge_str = "無優勢"
-                    warn_tag = " ⚠️最後預報" if row_status == "last_forecast_warning" else ""
-                    line = f"{temp_str}  {edge_str}{warn_tag}{price_line}"
+                        line = f"{temp_str}  {model_str}{warn_tag}{price_line}"
 
                 rows_text.append(line)
 
@@ -2110,31 +2104,23 @@ class WeatherSignalBot:
                 yes_e = _safe_float(r.get("yes_edge"), 0.0) or 0.0
                 no_e = _safe_float(r.get("no_edge"), 0.0) or 0.0
 
-                if yes_ask is None and no_ask is None:
-                    status_str = "無掛單"
-                    show_price = False
-                elif row_status == "stale_price":
-                    status_str = "價格過時"
-                    show_price = False
+                p_yes = _safe_float(r.get("p_yes"))
+                p_no = 1 - p_yes
+                model_str = f"模型YES {p_yes*100:.0f}%" if p_yes >= p_no else f"模型NO {p_no*100:.0f}%"
+                y = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
+                n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
+
+                if row_status == "stale_price" or (yes_ask is None and no_ask is None):
+                    body += f"  {temp}  {model_str}  無掛單\n"
                 elif row_status == "market_extreme":
-                    if no_ask is not None and yes_ask is not None and no_ask > yes_ask:
-                        status_str = "幾乎確定NO"
-                    else:
-                        status_str = "幾乎確定YES"
-                    show_price = True
+                    body += f"  {temp}  {model_str}\n    {y} / {n}\n"
                 else:
                     best_e = max(yes_e, no_e)
                     if best_e > 0.001:
-                        status_str = f"YES▲+{best_e*100:.1f}%" if yes_e >= no_e else f"NO▲+{best_e*100:.1f}%"
+                        edge_str = f"YES▲+{best_e*100:.1f}%" if yes_e >= no_e else f"NO▲+{best_e*100:.1f}%"
+                        body += f"  {temp}  {model_str}  {edge_str}\n    {y} / {n}\n"
                     else:
-                        status_str = "無優勢"
-                    show_price = True
-
-                y = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
-                n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
-                body += f"  {temp}  {status_str}\n"
-                if show_price:
-                    body += f"    {y} / {n}\n"
+                        body += f"  {temp}  {model_str}\n    {y} / {n}\n"
                 body += "\n"
 
         result = header + body
