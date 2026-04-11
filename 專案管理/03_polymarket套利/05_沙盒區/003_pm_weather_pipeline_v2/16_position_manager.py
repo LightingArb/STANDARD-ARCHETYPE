@@ -149,7 +149,17 @@ class PositionManager:
 
         side: "YES" 或 "NO"
         entry_cost_total = (entry_price + entry_fee_per_share) * shares
+
+        Raises:
+            ValueError: 若 market_id 或 token_id 為空（交易模組下單需要有效 token_id）。
         """
+        if not market_id:
+            raise ValueError("add_position: market_id is required")
+        if not token_id:
+            raise ValueError(
+                f"add_position: token_id is required (market_id={market_id}, side={side}). "
+                "Check market_master.csv has yes_token_id/no_token_id for this market."
+            )
         self._ensure_loaded()
         position_id = self._generate_id()
         entry_cost_total = (entry_price + entry_fee_per_share) * shares

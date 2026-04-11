@@ -95,6 +95,45 @@ def _update_system_health(component: str, data: dict) -> None:
         log.warning(f"_update_system_health({component}) failed: {e}")
 
 
+# P1-6：Price health gate — 讀 08 寫的 data/_price_health.json，
+# degraded=true 時推一次警告（有冷卻，透過 error_reporter）
+_PRICE_HEALTH_PATH = PROJ_DIR / "data" / "_price_health.json"
+
+
+def _check_price_health(error_reporter=None) -> dict:
+    """
+    讀 data/_price_health.json，若 degraded → log.warning + 透過 error_reporter 推 admin。
+    回傳 health dict（無論是否 degraded），callers 可以用 ok_ratio 做細部判斷。
+    """
+    if not _PRICE_HEALTH_PATH.exists():
+        return {}
+    try:
+        health = json.loads(_PRICE_HEALTH_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning(f"_check_price_health: read failed: {e}")
+        return {}
+    if not isinstance(health, dict):
+        return {}
+
+    if health.get("degraded"):
+        reason = health.get("degraded_reason", "")
+        ok_ratio = health.get("ok_ratio", 0)
+        log.warning(
+            f"⚠️  price health degraded: ok_ratio={ok_ratio} — {reason} "
+            f"(signal 仍會跑，但 best bid/ask 可能不可靠)"
+        )
+        if error_reporter is not None:
+            try:
+                error_reporter.report(
+                    "signal_main",
+                    f"Price fetch degraded: {reason}",
+                    "price_health_degraded",
+                )
+            except Exception as e:
+                log.debug(f"error_reporter.report failed: {e}")
+    return health
+
+
 # ============================================================
 # ErrorReporter（連續失敗/斷線推 admin，帶冷卻）
 # ============================================================
@@ -694,6 +733,34 @@ async def run_ws_mode(
         "ready_city_count": 0,
     })
 
+    # 即時觀測 fetcher 初始化（與 REST 模式保持一致）
+    obs_fetcher = None
+    seed_data: dict = {}
+    _params_for_obs = _load_params()
+    if str(_params_for_obs.get("use_current_obs", "false")).lower() == "true":
+        try:
+            seed_path = PROJ_DIR / "config" / "seed_cities.json"
+            if seed_path.exists():
+                seed_data = json.loads(seed_path.read_text(encoding="utf-8"))
+            from current_obs_fetcher import CurrentObsFetcher, load_wu_api_key
+            wu_key = load_wu_api_key()
+            if wu_key:
+                _default_ttl = int(float(_params_for_obs.get(
+                    "current_obs_default_ttl_seconds",
+                    _params_for_obs.get("current_obs_cache_ttl_seconds", 1800)
+                )))
+                _settling_ttl = int(float(_params_for_obs.get("current_obs_settling_ttl_seconds", 600)))
+                obs_fetcher = CurrentObsFetcher(
+                    api_key=wu_key,
+                    cache_ttl_seconds=_default_ttl,
+                    settling_ttl_seconds=_settling_ttl,
+                )
+                log.info(f"CurrentObsFetcher initialized (default_ttl={_default_ttl}s, settling_ttl={_settling_ttl}s) [WS mode]")
+            else:
+                log.warning("WU API key not found — CurrentObsFetcher disabled [WS mode]")
+        except Exception as e:
+            log.warning(f"CurrentObsFetcher init failed: {e} — running without obs clipping [WS mode]")
+
     # 啟動 WS ingestion（背景 asyncio task）
     ws_task = asyncio.create_task(stream.run(output_dir, once=False))
 
@@ -737,8 +804,47 @@ async def run_ws_mode(
                             meta = metadata_lookup(mid)
                             books_in_memory[mid] = ob.to_book_state_dict(meta)
 
-                # 即時觀測（讀 collector_main 產生的 latest_obs.json）
-                _ws_obs = _read_latest_obs()
+                # ── 即時觀測（WS mode，與 REST mode 保持一致）──
+                current_obs: dict = {}
+                if obs_fetcher and ready:
+                    try:
+                        cities_info = [
+                            {
+                                "city": c,
+                                "station_code": seed_data.get(c, {}).get("station_code", ""),
+                            }
+                            for c in ready
+                        ]
+                        # 動態 TTL：從上一輪 ev_signals.csv 讀最小 hours_to_settlement
+                        _hours_map_ws: dict = {}
+                        for _c in ready:
+                            _ev_path = PROJ_DIR / "data" / "results" / "ev_signals" / _c / "ev_signals.csv"
+                            if _ev_path.exists():
+                                try:
+                                    import csv as _csv
+                                    _min_h = None
+                                    with open(_ev_path, "r", encoding="utf-8") as _f:
+                                        for _row in _csv.DictReader(_f):
+                                            try:
+                                                _h = float(_row.get("lead_hours_to_settlement", ""))
+                                                if _h > 0:
+                                                    _min_h = _h if _min_h is None else min(_min_h, _h)
+                                            except (ValueError, TypeError):
+                                                pass
+                                    if _min_h is not None:
+                                        _hours_map_ws[_c] = _min_h
+                                except Exception:
+                                    pass
+                        current_obs = await asyncio.to_thread(
+                            obs_fetcher.get_all_current_highs,
+                            cities_info,
+                            _hours_map_ws,
+                        )
+                        if current_obs:
+                            _obs_summary = {c: f"{v['high_c']:.1f}C" for c, v in current_obs.items()}
+                            log.info(f"Current obs (WS): {_obs_summary}")
+                    except Exception as e:
+                        log.warning(f"CurrentObsFetcher error (WS): {e}")
 
                 # ── 12B-2：WS fallback to REST ─────────────────
                 if not books_in_memory:
@@ -753,8 +859,11 @@ async def run_ws_mode(
                         ["--cities", cities_arg],
                         "08_market_price_fetch (REST fallback)",
                     )
+                    # P1-6：REST fallback 也檢查 price health
+                    _check_price_health(error_reporter)
                     ev_ok, ev_results = await asyncio.to_thread(
-                        _run_ev_engine, ready, verbose, "json", None, _ws_obs
+                        _run_ev_engine, ready, verbose, "json", None,
+                        current_obs or None,
                     )
                 else:
                     # 正常 WS 路徑
@@ -764,14 +873,11 @@ async def run_ws_mode(
                         verbose,
                         "memory",
                         books_in_memory,
-                        _ws_obs,
+                        current_obs or None,
                     )
 
                 if not ev_ok:
                     raise RuntimeError("11_ev_engine failed (WS mode)")
-
-                # 預計算 signal_summary.json（供 bot 快速讀取，不阻塞主流程）
-                _write_signal_summary(ev_results)
 
                 # ── WS 事件時效性檢查（> 5 分鐘無事件 → 推錯誤）──
                 last_ws_utc = _get_ws_last_event_utc(bsm) if not ws_fallback_active else None
@@ -896,142 +1002,6 @@ async def run_ws_mode(
 
 
 # ============================================================
-# signal_summary.json 預計算（供 telegram_bot 快速讀取）
-# ============================================================
-
-def _write_signal_summary(ev_results: list) -> None:
-    """ev_engine 跑完後，分四組寫 data/results/signal_summary.json（原子寫入）。
-
-    四組：ranking（> 24h active BUY）、today（≤ 24h active BUY）、
-          warning（last_forecast_warning BUY）、settling（< 6h，含全部合約）。
-    """
-    import math
-    from collections import defaultdict
-
-    def _sf(v, default=0.0):
-        if v is None:
-            return default
-        try:
-            f = float(v)
-            return default if (math.isnan(f) or math.isinf(f)) else f
-        except (TypeError, ValueError):
-            return default
-
-    def _lead_hrs(row):
-        v = row.get("lead_hours_to_settlement", "")
-        if v == "" or v is None:
-            return None
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-
-    def _best_edge(row):
-        return max(_sf(row.get("yes_edge"), -999), _sf(row.get("no_edge"), -999))
-
-    def _sanitize(obj):
-        """遞迴把 nan/inf 替換成 None，確保 JSON 可序列化。"""
-        if isinstance(obj, dict):
-            return {k: _sanitize(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_sanitize(v) for v in obj]
-        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-            return None
-        return obj
-
-    try:
-        ranking, today, warning, settling_rows = [], [], [], []
-        for row in ev_results:
-            hours = _lead_hrs(row)
-            action = row.get("signal_action", "")
-            status = row.get("signal_status", "")
-            is_buy = action in ("BUY_YES", "BUY_NO")
-            is_active = status == "active"
-            is_warn = status == "last_forecast_warning"
-
-            if hours is not None and 0 < hours < 6:
-                settling_rows.append(row)
-            if is_active and is_buy:
-                if hours is None or hours > 24:
-                    ranking.append(row)
-                elif hours <= 24:
-                    today.append(row)
-            if is_warn and is_buy:
-                warning.append(row)
-
-        ranking.sort(key=_best_edge, reverse=True)
-        today.sort(key=_best_edge, reverse=True)
-        warning.sort(key=_best_edge, reverse=True)
-
-        # settling：按 (city, market_date_local) 分組
-        grp: dict = defaultdict(list)
-        for r in settling_rows:
-            grp[(r.get("city", ""), r.get("market_date_local", ""))].append(r)
-
-        settling = []
-        for (city, date), rows in grp.items():
-            hrs_list = [_lead_hrs(r) for r in rows if _lead_hrs(r) is not None]
-            settling.append({
-                "city": city,
-                "market_date": date,
-                "hours_to_settlement": min(hrs_list) if hrs_list else 0.0,
-                "rows": rows,
-            })
-        settling.sort(key=lambda x: x["hours_to_settlement"])
-
-        summary = _sanitize({
-            "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "ranking": ranking,
-            "today": today,
-            "warning": warning,
-            "settling": settling,
-        })
-
-        path = PROJ_DIR / "data" / "results" / "signal_summary.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-        log.info(
-            f"signal_summary written: ranking={len(ranking)} today={len(today)} "
-            f"warning={len(warning)} settling={len(settling)} groups"
-        )
-    except Exception as e:
-        log.warning(f"_write_signal_summary failed: {e}")
-
-
-# ============================================================
-# 觀測 JSON 讀取（collector_main 已集中寫入）
-# ============================================================
-
-def _read_latest_obs() -> Optional[dict]:
-    """讀 data/observations/latest_obs.json → 轉成 11 期待的 dict。"""
-    obs_path = PROJ_DIR / "data" / "observations" / "latest_obs.json"
-    if not obs_path.exists():
-        return None
-    try:
-        raw = json.loads(obs_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        log.warning(f"latest_obs.json parse error: {e}")
-        return None
-    cities_data = raw.get("cities", raw)
-    current_obs: dict = {}
-    for city, obs in cities_data.items():
-        if not isinstance(obs, dict):
-            continue
-        if obs.get("status") != "ok":
-            continue
-        if obs.get("high_c") is None:
-            continue
-        current_obs[city] = {
-            "high_c": obs["high_c"],
-            "source": obs.get("source", ""),
-            "obs_time": obs.get("obs_time_utc", ""),  # adapter: obs_time_utc → obs_time
-        }
-    return current_obs if current_obs else None
-
-
-# ============================================================
 # 主循環（REST 模式）
 # ============================================================
 
@@ -1071,7 +1041,33 @@ def run_signal(
         log.warning(f"PositionManager setup failed: {e} — running without position tracking")
         position_mgr = None
 
-    # 即時觀測：由 collector_main 集中寫入 latest_obs.json，signal_main 每輪讀取
+    # 即時觀測 fetcher 初始化（啟動時一次）
+    obs_fetcher = None
+    seed_data: dict = {}
+    _params_for_obs = _load_params()
+    if str(_params_for_obs.get("use_current_obs", "false")).lower() == "true":
+        try:
+            seed_path = PROJ_DIR / "config" / "seed_cities.json"
+            if seed_path.exists():
+                seed_data = json.loads(seed_path.read_text(encoding="utf-8"))
+            from current_obs_fetcher import CurrentObsFetcher, load_wu_api_key
+            wu_key = load_wu_api_key()
+            if wu_key:
+                _default_ttl = int(float(_params_for_obs.get(
+                    "current_obs_default_ttl_seconds",
+                    _params_for_obs.get("current_obs_cache_ttl_seconds", 1800)
+                )))
+                _settling_ttl = int(float(_params_for_obs.get("current_obs_settling_ttl_seconds", 600)))
+                obs_fetcher = CurrentObsFetcher(
+                    api_key=wu_key,
+                    cache_ttl_seconds=_default_ttl,
+                    settling_ttl_seconds=_settling_ttl,
+                )
+                log.info(f"CurrentObsFetcher initialized (default_ttl={_default_ttl}s, settling_ttl={_settling_ttl}s)")
+            else:
+                log.warning("WU API key not found — CurrentObsFetcher disabled")
+        except Exception as e:
+            log.warning(f"CurrentObsFetcher init failed: {e} — running without obs clipping")
 
     # 優雅退出 hook
     _setup_shutdown_hooks(position_mgr)
@@ -1114,11 +1110,48 @@ def run_signal(
                 if not ok_price:
                     log.warning("08_market_price_fetch failed (non-blocking — 11 will use stale price)")
 
-                # 3. 即時觀測（讀 collector_main 產生的 latest_obs.json）
-                current_obs = _read_latest_obs()
-                if current_obs:
-                    _obs_summary = {c: f"{v['high_c']:.1f}C" for c, v in current_obs.items()}
-                    log.info(f"Current obs: {_obs_summary}")
+                # P1-6：price health gate — 08 會寫 data/_price_health.json
+                _check_price_health(error_reporter)
+
+                # 3. 即時觀測（有 fetcher 時抓最新溫度）
+                current_obs: dict = {}
+                if obs_fetcher:
+                    try:
+                        cities_info = [
+                            {
+                                "city": c,
+                                "station_code": seed_data.get(c, {}).get("station_code", ""),
+                            }
+                            for c in ready
+                        ]
+                        # 動態 TTL：從上一輪 ev_signals.csv 讀最小 hours_to_settlement
+                        _hours_map: dict = {}
+                        for _c in ready:
+                            _ev_path = PROJ_DIR / "data" / "results" / "ev_signals" / _c / "ev_signals.csv"
+                            if _ev_path.exists():
+                                try:
+                                    import csv as _csv
+                                    _min_h = None
+                                    with open(_ev_path, "r", encoding="utf-8") as _f:
+                                        for _row in _csv.DictReader(_f):
+                                            try:
+                                                _h = float(_row.get("lead_hours_to_settlement", ""))
+                                                if _h > 0:
+                                                    _min_h = _h if _min_h is None else min(_min_h, _h)
+                                            except (ValueError, TypeError):
+                                                pass
+                                    if _min_h is not None:
+                                        _hours_map[_c] = _min_h
+                                except Exception:
+                                    pass
+                        current_obs = obs_fetcher.get_all_current_highs(
+                            cities_info, hours_to_settlement_map=_hours_map
+                        )
+                        if current_obs:
+                            _obs_summary = {c: f"{v['high_c']:.1f}C" for c, v in current_obs.items()}
+                            log.info(f"Current obs: {_obs_summary}")
+                    except Exception as e:
+                        log.warning(f"CurrentObsFetcher error: {e}")
 
                 # 4. 算 EV + 信號（11，in-process，回傳 in-memory 結果）
                 ok_ev, ev_results = _run_ev_engine(
@@ -1126,9 +1159,6 @@ def run_signal(
                 )
                 if not ok_ev:
                     raise RuntimeError("11_ev_engine failed")
-
-                # 4b. 預計算 signal_summary.json（供 bot 快速讀取，不阻塞主流程）
-                _write_signal_summary(ev_results)
 
                 # 5. STEP 10：AlertEngine 通報
                 if alert_engine is not None:

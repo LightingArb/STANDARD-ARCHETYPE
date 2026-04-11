@@ -26,9 +26,13 @@ import logging
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJ_DIR = Path(__file__).resolve().parent
+
+# 本次 run() 共用的時間戳；run() 開頭會覆寫（供 11 檢測上游是否有更新）
+_RUN_GENERATED_UTC: str = ""
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -47,16 +51,19 @@ OUTPUT_FIELDS = [
     "range_low",
     "range_high",
     "temp_unit",
+    "precision_half",         # 原始單位的邊界半寬（供 11 的觀測裁剪使用）
     "model_name",
     "model_scope",
     "predicted_daily_high",
     "lead_day",
     "lead_hours_to_settlement",
     "bucket_used",
+    "bucket_level_used",
     "bucket_sample_count",
     "p_yes",
     "p_no",
     "sum_p_all_bins",
+    "generated_utc",          # 本次執行的 UTC 時間戳（供 11 檢測上游更新）
 ]
 
 # ============================================================
@@ -260,6 +267,10 @@ def run(
     log.info(f"⚠️  {MODEL_SCOPE} — 僅供管線驗證，不可用於交易決策")
     log.info("=" * 55)
 
+    # 本次執行的時間戳（整輪共用，供 11 檢測上游更新）
+    global _RUN_GENERATED_UTC
+    _RUN_GENERATED_UTC = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     cities_filter = {c.strip() for c in cities.split(",") if c.strip()} if cities else set()
 
     # Only empirical is fully implemented for p_t; OU/QR not yet supported
@@ -316,7 +327,8 @@ def run(
             station_id = mkt.get("station_id", "")
             temp_unit = mkt.get("temp_unit", "C")
             precision_str = mkt.get("precision", "1C")
-            half_w = precision_half_width(precision_str)
+            half_w_orig = precision_half_width(precision_str)  # 原始單位（F 或 C）
+            half_w = half_w_orig                                # 給 compute_p_yes 用（會轉 °C）
 
             threshold = safe_float(mkt.get("threshold"))
             range_low = safe_float(mkt.get("range_low"))
@@ -361,6 +373,14 @@ def run(
             # ── Get bucket（優先 lead_hours 6h bucket，fallback lead_day）──
             _lead_hours_val = safe_float(_lead_hours_to_settlement) if _lead_hours_to_settlement else None
             bucket, bucket_key = get_bucket(model, actual_lead_day, lead_hours=_lead_hours_val)
+
+            # Derive bucket level for diagnostics
+            if bucket_key is not None and bucket_key.startswith("lead_hours_"):
+                _bucket_level = "lead_hours"
+            elif bucket_key == f"lead_day_{actual_lead_day}":
+                _bucket_level = "lead_day_exact"
+            else:
+                _bucket_level = "lead_day_nearest"
             if bucket is None:
                 log.warning(f"  No bucket for {city} lead_day={actual_lead_day}, skipping market {market_id}")
                 continue
@@ -391,16 +411,19 @@ def run(
                 "range_low": range_low_orig if range_low_orig is not None else "",
                 "range_high": range_high_orig if range_high_orig is not None else "",
                 "temp_unit": temp_unit,
+                "precision_half": round(half_w_orig, 6),  # 原始單位
                 "model_name": effective_model,
                 "model_scope": MODEL_SCOPE,
                 "predicted_daily_high": round(predicted, 4),
                 "lead_day": actual_lead_day,
                 "lead_hours_to_settlement": _lead_hours_to_settlement,
                 "bucket_used": bucket_key,
+                "bucket_level_used": _bucket_level,
                 "bucket_sample_count": bucket.get("sample_count", len(sorted_errors)),
                 "p_yes": p_yes,
                 "p_no": p_no,
                 "sum_p_all_bins": "",  # Filled in post-processing below
+                "generated_utc": _RUN_GENERATED_UTC,
             })
 
         # ── sum_p_all_bins sanity check ──

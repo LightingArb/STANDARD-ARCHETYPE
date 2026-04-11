@@ -27,10 +27,12 @@ PROJ_DIR = Path(__file__).resolve().parent.parent
 
 _FLOAT_FIELDS = frozenset({
     "p_yes", "p_no",
+    "precision_half",
     "yes_ask_price", "no_ask_price",
     "yes_edge", "no_edge",
     "yes_ev", "no_ev",
     "naive_fair_yes", "naive_fair_no",
+    "fair_exit_yes", "fair_exit_no",
     "yes_fee", "no_fee",
     "yes_cost", "no_cost",
     "kelly_fraction_yes", "kelly_fraction_no",
@@ -124,27 +126,74 @@ class SignalDataReader:
         self.alert_history_dir = PROJ_DIR / "logs" / "15_alert"
         self._temp_unit_map: dict[str, str] = {}
         self._city_tz_map: dict[str, str] = {}
+        self._token_map: dict[str, tuple[str, str]] = {}  # market_id → (yes_token_id, no_token_id)
+        # mtime-based caches（v7.3.9）
+        self._mm_mtime: float = 0.0                    # market_master.csv mtime
+        self._cache_rows: dict[str, list[dict]] = {}   # city → parsed+joined rows
+        self._cache_mtime: dict[str, float] = {}       # city → ev_signals.csv mtime
         self._load_market_master_maps()
 
-    def _load_market_master_maps(self) -> None:
-        """從 market_master.csv 建立 market_id→temp_unit 和 city→timezone 兩個 lookup。"""
+    def _load_market_master_maps(self, force: bool = False) -> None:
+        """從 market_master.csv 建立三個 lookup：
+        - market_id → temp_unit
+        - city → timezone
+        - market_id → (yes_token_id, no_token_id)  # 供交易模組下單用
+
+        **v7.3.9**：mtime-based 惰性重載。`force=True` 強制重讀。
+        若 file 不存在 / mtime 沒變 / 讀檔失敗，則保留現有 maps（不清空）。
+        backfill 新增城市時 ev_signals 路徑會先有資料，下一次 _read_city_ev_csv
+        前的 _ensure_market_master_loaded() 會自動把新 token 拉進來。
+        """
         path = self.data_dir / "market_master.csv"
         if not path.exists():
             return
+        try:
+            current_mtime = path.stat().st_mtime
+        except OSError:
+            return
+        if not force and current_mtime == self._mm_mtime:
+            return  # 沒變，沿用現有 maps
+
+        new_temp_unit: dict[str, str] = {}
+        new_city_tz: dict[str, str] = {}
+        new_token: dict[str, tuple[str, str]] = {}
         try:
             with open(path, "r", encoding="utf-8", newline="") as f:
                 for row in csv.DictReader(f):
                     mid = row.get("market_id", "")
                     unit = row.get("temp_unit", "")
                     if mid and unit:
-                        self._temp_unit_map[mid] = unit
+                        new_temp_unit[mid] = unit
                     city = row.get("city", "")
                     tz = row.get("timezone", "")
-                    if city and tz and city not in self._city_tz_map:
-                        self._city_tz_map[city] = tz
-            log.debug(f"_load_market_master_maps: {len(self._temp_unit_map)} temp_unit, {len(self._city_tz_map)} tz entries")
+                    if city and tz and city not in new_city_tz:
+                        new_city_tz[city] = tz
+                    yes_tok = row.get("yes_token_id", "")
+                    no_tok = row.get("no_token_id", "")
+                    if mid and (yes_tok or no_tok):
+                        new_token[mid] = (yes_tok, no_tok)
         except Exception as e:
-            log.warning(f"_load_market_master_maps: {e}")
+            log.warning(f"_load_market_master_maps: {e} (keeping previous maps)")
+            return
+
+        # 整體替換（成功才覆寫，避免半段失敗污染）
+        self._temp_unit_map = new_temp_unit
+        self._city_tz_map = new_city_tz
+        self._token_map = new_token
+        self._mm_mtime = current_mtime
+        log.debug(
+            f"_load_market_master_maps: {len(new_temp_unit)} temp_unit, "
+            f"{len(new_city_tz)} tz, {len(new_token)} token entries "
+            f"(mtime={current_mtime:.0f})"
+        )
+
+    def _ensure_market_master_loaded(self) -> None:
+        """每次讀 ev_signals 之前呼叫，便宜（一次 stat() + mtime 比較）。"""
+        self._load_market_master_maps(force=False)
+
+    def get_token_ids(self, market_id: str) -> tuple[str, str]:
+        """回傳 (yes_token_id, no_token_id)。找不到回傳 ("", "")。"""
+        return self._token_map.get(market_id, ("", ""))
 
     # 保留舊名稱以防萬一有外部呼叫
     def _load_temp_unit_map(self) -> dict[str, str]:
@@ -175,24 +224,53 @@ class SignalDataReader:
     # ── EV Signals ───────────────────────────────────────────
 
     def _read_city_ev_csv(self, city: str) -> list[dict]:
-        """Read and parse ev_signals.csv for a city. Returns [] on error."""
+        """Read and parse ev_signals.csv for a city. Returns [] on error.
+
+        同時 join market_master：
+        - temp_unit（若 ev_signals 沒有）
+        - yes_token_id / no_token_id（交易模組下單用；ev_signals.csv 不含 token）
+
+        **v7.3.9 cache**：mtime-based。signal_main 每 30s 寫一次 ev_signals.csv，
+        只有該城市真的有新資料時才會 cache miss。其他時間 bot 按按鈕全部 hit cache，
+        省掉每次重新 csv.DictReader + _parse_row（每 row ~30 個欄位 float 轉型）。
+        讀檔失敗時保留上一輪快取，不清空。
+        """
+        # 確保 market_master maps 是最新的（便宜，stat + mtime 比較）
+        self._ensure_market_master_loaded()
+
         path = self.ev_signals_root / city / "ev_signals.csv"
         if not path.exists():
             return []
         try:
-            rows = []
+            current_mtime = path.stat().st_mtime
+        except OSError:
+            return self._cache_rows.get(city, [])
+
+        # Cache hit：mtime 沒變 → 直接回傳記憶體版本
+        cached_mtime = self._cache_mtime.get(city)
+        if cached_mtime == current_mtime and city in self._cache_rows:
+            return self._cache_rows[city]
+
+        # Cache miss：重讀、parse、join
+        try:
+            rows: list[dict] = []
             with open(path, "r", encoding="utf-8", newline="") as f:
                 for raw in csv.DictReader(f):
                     row = _parse_row(raw)
-                    # ev_signals.csv 沒有 temp_unit 欄位，從 market_master lookup 補入
+                    mid = row.get("market_id", "")
                     if not row.get("temp_unit"):
-                        mid = row.get("market_id", "")
                         row["temp_unit"] = self._temp_unit_map.get(mid, "C")
+                    yes_tok, no_tok = self._token_map.get(mid, ("", ""))
+                    row["yes_token_id"] = yes_tok
+                    row["no_token_id"] = no_tok
                     rows.append(row)
-            return rows
         except Exception as e:
-            log.warning(f"_read_city_ev_csv({city}): {e}")
-            return []
+            log.warning(f"_read_city_ev_csv({city}): {e} (keeping previous cache)")
+            return self._cache_rows.get(city, [])
+
+        self._cache_rows[city] = rows
+        self._cache_mtime[city] = current_mtime
+        return rows
 
     def get_available_dates(self, city: str) -> list[str]:
         """該城市有哪些 market_date_local（排序，最舊→最新）。"""
@@ -395,7 +473,8 @@ class SignalDataReader:
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
             return state.get("last_success_utc")
-        except Exception:
+        except Exception as e:
+            log.warning(f"get_last_refresh_time: parse failed ({e})")
             return None
 
     def get_signal_state(self) -> dict:
@@ -405,7 +484,8 @@ class SignalDataReader:
             return {}
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as e:
+            log.warning(f"get_signal_state: parse failed ({e})")
             return {}
 
     # ── Flag writers ──────────────────────────────────────────

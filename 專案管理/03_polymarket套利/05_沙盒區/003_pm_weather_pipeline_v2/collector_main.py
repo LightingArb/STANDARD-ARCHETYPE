@@ -26,7 +26,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -168,19 +168,21 @@ def _load_csm():
 # 排程器（對齊 UTC 時鐘，避免漂移）
 # ============================================================
 
-def _secs_until_utc_hour(target_hour: int) -> float:
+def _next_aligned_utc_hour_ts(target_hour: int) -> float:
     """
-    計算距離下一個 target_hour:00:00 UTC 的秒數。
+    距離下一個 target_hour:00:00 UTC 的絕對 epoch 秒（P2-8：改用絕對 UTC，非 monotonic）。
     已過或距離 < 60s → 排到明天同時間。
     """
-    from datetime import timedelta as _td
-    now_utc = datetime.now(timezone.utc)
-    today_target = now_utc.replace(
-        hour=target_hour, minute=0, second=0, microsecond=0
-    )
-    if (now_utc - today_target).total_seconds() >= -60:
-        today_target += _td(days=1)
-    return max(1.0, (today_target - now_utc).total_seconds())
+    now = datetime.now(timezone.utc)
+    today_target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    if now >= today_target - timedelta(seconds=60):
+        today_target += timedelta(days=1)
+    return today_target.timestamp()
+
+
+def _now_ts() -> float:
+    """Current UTC epoch seconds."""
+    return datetime.now(timezone.utc).timestamp()
 
 
 class CollectorScheduler:
@@ -189,51 +191,97 @@ class CollectorScheduler:
       - 城市掃描：每天 06:00 UTC
       - Truth 更新：每天 00:00 UTC
       - Forecast 更新：每 6 小時（相對間隔）
-    首次執行立刻觸發；後續依目標 UTC 時間對齊，不因任務拉長而漂移。
+      - Obs：每 10 分鐘
+
+    **P2-8**：`_next_*` 儲存為 UTC epoch 秒並持久化到 data/_collector_scheduler.json，
+    重啟不會所有任務立即觸發（除非檔案不存在或已到期）。原本用 time.monotonic() 重啟後歸零。
     """
+
+    STATE_PATH = PROJ_DIR / "data" / "_collector_scheduler.json"
 
     SCAN_HOUR_UTC = 6        # 城市掃描時間（UTC hour）
     TRUTH_HOUR_UTC = 0       # Truth 更新時間（UTC hour）
-    FORECAST_INTERVAL_H = 6  # Forecast 每 6 小時（相對間隔）
-    OBS_INTERVAL_S = 600     # 即時觀測每 10 分鐘
+    FORECAST_INTERVAL_S = 6 * 3600   # Forecast 每 6 小時
+    OBS_INTERVAL_S = 600             # 即時觀測每 10 分鐘
 
     def __init__(self):
-        now = time.monotonic()
-        # 首次執行：立刻觸發所有任務
-        self._next_scan = now
-        self._next_forecast = now
-        self._next_truth = now
-        self._next_obs = now
+        # 預設為 0 → 第一次會立刻觸發；_load_state 會覆寫為持久化值
+        self._next_scan_ts: float = 0.0
+        self._next_forecast_ts: float = 0.0
+        self._next_truth_ts: float = 0.0
+        self._next_obs_ts: float = 0.0
+        self._load_state()
 
+    # ── 排程判斷 ──────────────────────────────────────────────
     def should_scan(self) -> bool:
-        return time.monotonic() >= self._next_scan
+        return _now_ts() >= self._next_scan_ts
 
     def should_update_forecast(self) -> bool:
-        return time.monotonic() >= self._next_forecast
+        return _now_ts() >= self._next_forecast_ts
 
     def should_update_truth(self) -> bool:
-        return time.monotonic() >= self._next_truth
+        return _now_ts() >= self._next_truth_ts
 
     def should_update_obs(self) -> bool:
-        return time.monotonic() >= self._next_obs
+        return _now_ts() >= self._next_obs_ts
 
+    # ── 排程更新（每次都落盤）──────────────────────────────────
     def mark_scanned(self) -> None:
-        secs = _secs_until_utc_hour(self.SCAN_HOUR_UTC)
-        self._next_scan = time.monotonic() + secs
+        self._next_scan_ts = _next_aligned_utc_hour_ts(self.SCAN_HOUR_UTC)
+        secs = self._next_scan_ts - _now_ts()
         log.info(f"Next city scan in {secs/3600:.1f}h (next {self.SCAN_HOUR_UTC:02d}:00 UTC)")
+        self._save_state()
 
     def mark_forecast_updated(self) -> None:
-        secs = self.FORECAST_INTERVAL_H * 3600
-        self._next_forecast = time.monotonic() + secs
-        log.info(f"Next forecast update in {self.FORECAST_INTERVAL_H}h")
+        self._next_forecast_ts = _now_ts() + self.FORECAST_INTERVAL_S
+        log.info(f"Next forecast update in {self.FORECAST_INTERVAL_S / 3600:.0f}h")
+        self._save_state()
 
     def mark_truth_updated(self) -> None:
-        secs = _secs_until_utc_hour(self.TRUTH_HOUR_UTC)
-        self._next_truth = time.monotonic() + secs
+        self._next_truth_ts = _next_aligned_utc_hour_ts(self.TRUTH_HOUR_UTC)
+        secs = self._next_truth_ts - _now_ts()
         log.info(f"Next truth update in {secs/3600:.1f}h (next {self.TRUTH_HOUR_UTC:02d}:00 UTC)")
+        self._save_state()
 
     def mark_obs_updated(self) -> None:
-        self._next_obs = time.monotonic() + self.OBS_INTERVAL_S
+        self._next_obs_ts = _now_ts() + self.OBS_INTERVAL_S
+        self._save_state()
+
+    # ── 持久化（P2-8）──────────────────────────────────────────
+    def _save_state(self) -> None:
+        try:
+            self.STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "next_scan_ts": self._next_scan_ts,
+                "next_forecast_ts": self._next_forecast_ts,
+                "next_truth_ts": self._next_truth_ts,
+                "next_obs_ts": self._next_obs_ts,
+                "saved_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            tmp = self.STATE_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(str(tmp), str(self.STATE_PATH))
+        except Exception as e:
+            log.warning(f"CollectorScheduler._save_state: {e}")
+
+    def _load_state(self) -> None:
+        """Load persisted _next_* from disk. Missing/corrupt → fire immediately (0.0)."""
+        if not self.STATE_PATH.exists():
+            return
+        try:
+            data = json.loads(self.STATE_PATH.read_text(encoding="utf-8"))
+            self._next_scan_ts = float(data.get("next_scan_ts", 0) or 0)
+            self._next_forecast_ts = float(data.get("next_forecast_ts", 0) or 0)
+            self._next_truth_ts = float(data.get("next_truth_ts", 0) or 0)
+            self._next_obs_ts = float(data.get("next_obs_ts", 0) or 0)
+            log.info(
+                f"CollectorScheduler: resumed state "
+                f"(scan in {(self._next_scan_ts - _now_ts())/3600:.1f}h, "
+                f"forecast in {(self._next_forecast_ts - _now_ts())/3600:.1f}h, "
+                f"obs in {(self._next_obs_ts - _now_ts()):.0f}s)"
+            )
+        except Exception as e:
+            log.warning(f"CollectorScheduler._load_state: {e} — starting fresh")
 
 
 # ============================================================
@@ -245,105 +293,209 @@ import csv as _csv_mod
 _OBS_DIR = PROJ_DIR / "data" / "observations"
 _LATEST_OBS_PATH = _OBS_DIR / "latest_obs.json"
 
+# P1-5：長壽 CurrentObsFetcher（整個進程共用，cache TTL 才有意義）
+_OBS_FETCHER = None  # type: ignore[assignment]
 
-def _write_latest_json(new_results: dict, now_str: str) -> None:
-    """merge 式寫入 latest_obs.json：成功城市覆蓋，失敗城市保留舊值。原子寫入。"""
-    old: dict = {}
+
+def _get_obs_fetcher():
+    """Lazy singleton for CurrentObsFetcher (P1-5)."""
+    global _OBS_FETCHER
+    if _OBS_FETCHER is not None:
+        return _OBS_FETCHER
+    try:
+        from _lib.current_obs_fetcher import CurrentObsFetcher, load_wu_api_key
+    except Exception as e:
+        log.warning(f"obs fetch: load fetcher module failed: {e}")
+        return None
+    api_key = load_wu_api_key()
+    if not api_key:
+        log.warning("obs fetch: no WU API key, skip")
+        return None
+    _OBS_FETCHER = CurrentObsFetcher(api_key)
+    return _OBS_FETCHER
+
+
+def _write_latest_json(
+    new_results: dict,
+    fetched_at_utc: str,
+    failed_cities: Optional[list] = None,
+) -> None:
+    """
+    merge 式寫入 latest_obs.json（P1-2 + P1-3 修正）：
+
+    - 成功城市：覆蓋舊值，status=ok，清掉 stale_since_utc
+    - 失敗城市：保留舊 high_c / current_temp_c，status=stale；
+      若原本 status=ok 則記 stale_since_utc=fetched_at_utc
+    - updated_at_utc 無條件更新（避免「全失敗就停留在舊時間」的盲點）
+    - 原子寫入
+    """
+    old_cities: dict = {}
     if _LATEST_OBS_PATH.exists():
         try:
             raw = json.loads(_LATEST_OBS_PATH.read_text(encoding="utf-8"))
-            old = raw.get("cities", raw)
-        except Exception:
-            old = {}
+            old_cities = raw.get("cities", {}) if isinstance(raw, dict) else {}
+            if not isinstance(old_cities, dict):
+                old_cities = {}
+        except Exception as e:
+            log.warning(f"_write_latest_json: read existing failed ({e}), starting fresh")
+            old_cities = {}
+
+    # 成功城市：覆蓋
     for city, obs in new_results.items():
-        old[city] = obs
-    output = {"schema_version": 1, "updated_at_utc": now_str, "cities": old}
+        old_cities[city] = obs
+
+    # 失敗城市：保留舊值但標記 stale
+    failed = failed_cities or []
+    for city in failed:
+        prev = old_cities.get(city)
+        if not prev:
+            continue  # 以前沒抓過就沒東西可保留
+        prev = dict(prev)  # copy
+        prev["last_attempt_utc"] = fetched_at_utc
+        if prev.get("status") != "stale":
+            # 首次從 ok → stale，記錄時間點
+            prev["stale_since_utc"] = fetched_at_utc
+        prev["status"] = "stale"
+        old_cities[city] = prev
+
+    output = {
+        "schema_version": 2,
+        "updated_at_utc": fetched_at_utc,
+        "cities": old_cities,
+    }
+    _OBS_DIR.mkdir(parents=True, exist_ok=True)
     tmp = _LATEST_OBS_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(_LATEST_OBS_PATH)
+    os.replace(str(tmp), str(_LATEST_OBS_PATH))
 
 
-def _append_obs_csv(new_results: dict, now_str: str) -> None:
-    """按月分檔 append current_obs_YYYY-MM.csv。"""
-    month_str = now_str[:7]
+def _append_obs_csv(
+    new_results: dict,
+    failed_cities: Optional[list],
+    fetched_at_utc: str,
+) -> None:
+    """按月分檔 append current_obs_YYYY-MM.csv（成功+失敗都記）。"""
+    month_str = fetched_at_utc[:7]
     csv_path = _OBS_DIR / f"current_obs_{month_str}.csv"
     write_header = not csv_path.exists()
-    fields = ["fetched_at_utc", "city", "station_code", "high_c",
-              "current_temp_c", "obs_time_utc", "source", "status"]
+    fields = [
+        "fetched_at_utc", "city", "station_code",
+        "high_c", "current_temp_c", "obs_time_utc",
+        "source", "status",
+    ]
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
-        writer = _csv_mod.DictWriter(f, fieldnames=fields)
+        writer = _csv_mod.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if write_header:
             writer.writeheader()
         for city, obs in sorted(new_results.items()):
             writer.writerow({
-                "fetched_at_utc": now_str,
+                "fetched_at_utc": fetched_at_utc,
                 "city": city,
                 "station_code": obs.get("station_code", ""),
                 "high_c": obs.get("high_c", ""),
                 "current_temp_c": obs.get("current_temp_c", ""),
                 "obs_time_utc": obs.get("obs_time_utc", ""),
                 "source": obs.get("source", ""),
-                "status": obs.get("status", ""),
+                "status": obs.get("status", "ok"),
+            })
+        for city in sorted(failed_cities or []):
+            writer.writerow({
+                "fetched_at_utc": fetched_at_utc,
+                "city": city,
+                "station_code": "",
+                "high_c": "",
+                "current_temp_c": "",
+                "obs_time_utc": "",
+                "source": "",
+                "status": "stale",
             })
         f.flush()
 
 
 def _run_obs_fetch(ready_cities: list, seed_cities: dict) -> None:
-    """每 10 分鐘：抓 WU 即時觀測，寫 latest_obs.json + 月 CSV。"""
+    """
+    每 10 分鐘：抓 WU 即時觀測，寫 latest_obs.json + 月 CSV。
+
+    修正合集：
+    - P1-2：無條件更新 updated_at_utc（即使全失敗）
+    - P1-3：失敗城市保留舊值但 status=stale、帶 stale_since_utc
+    - P1-4：current_temp_c 真的從 WU `temperature` 拿，不再複製 high_c；
+            obs_time_utc 存成 int epoch（fetcher 已修）
+    - P1-5：_get_obs_fetcher() 長壽 singleton，cache 跨輪生效
+    - P2-1：並行抓取 + 300s 總預算
+    """
     _OBS_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        from _lib.current_obs_fetcher import CurrentObsFetcher, load_wu_api_key
-        api_key = load_wu_api_key()
-    except Exception as e:
-        log.warning(f"obs fetch: load fetcher failed: {e}")
-        return
-    if not api_key:
-        log.warning("obs fetch: no WU API key, skip")
+    fetcher = _get_obs_fetcher()
+    if fetcher is None:
         return
 
-    fetcher = CurrentObsFetcher(api_key)
     now_utc = datetime.now(timezone.utc)
-    now_str = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    new_results: dict = {}
-    ok_count = 0
-    fail_count = 0
+    fetched_at_utc = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # 組合 cities_info（跳過沒 station_code 的）
+    cities_info: list[dict] = []
+    expected_cities: set = set()
     for city in ready_cities:
-        city_seed = seed_cities.get(city, {})
-        station = city_seed.get("station_code", "")
+        station = seed_cities.get(city, {}).get("station_code", "")
         if not station:
             continue
-        try:
-            obs = fetcher.get_current_high(city, station)
-            if obs:
-                new_results[city] = {
-                    "high_c": obs.get("high_c"),
-                    "current_temp_c": obs.get("high_c"),  # v3 只有 max-since-7am
-                    "obs_time_utc": str(obs.get("obs_time", "")),
-                    "fetched_at_utc": now_str,
-                    "source": obs.get("source", "v3_current"),
-                    "station_code": station,
-                    "status": "ok",
-                    "schema_version": 1,
-                }
-                ok_count += 1
-            else:
-                fail_count += 1
-        except Exception as e:
-            log.warning(f"obs fetch {city}: {e}")
-            fail_count += 1
+        cities_info.append({"city": city, "station_code": station})
+        expected_cities.add(city)
 
-    if new_results:
-        _write_latest_json(new_results, now_str)
-        _append_obs_csv(new_results, now_str)
+    if not cities_info:
+        log.info("obs fetch: no ready cities with station_code — nothing to fetch")
+        # 仍然更新 updated_at_utc（P1-2）
+        _write_latest_json({}, fetched_at_utc, failed_cities=[])
+        return
 
-    log.info(f"obs fetch: {ok_count} ok, {fail_count} fail")
+    # 並行抓取（P2-1）
+    raw_obs = fetcher.get_all_parallel(
+        cities_info,
+        hours_to_settlement_map=None,  # 第一版不動態調 TTL
+        max_workers=5,
+        total_budget_s=300.0,
+    )
+
+    # 組裝 per-city schema（含 station_code + status=ok + schema_version）
+    new_results: dict = {}
+    for info in cities_info:
+        city = info["city"]
+        station = info["station_code"]
+        obs = raw_obs.get(city)
+        if not obs:
+            continue
+        new_results[city] = {
+            "high_c": obs.get("high_c"),
+            "current_temp_c": obs.get("current_temp_c"),  # WU `temperature`，可能為 None
+            "obs_time_utc": obs.get("obs_time_utc"),      # int epoch or None
+            "fetched_at_utc": fetched_at_utc,
+            "last_success_utc": fetched_at_utc,
+            "source": obs.get("source", "v3_current"),
+            "station_code": station,
+            "status": "ok",
+            "stale_since_utc": None,
+            "schema_version": 2,
+        }
+
+    failed_cities = sorted(expected_cities - set(new_results.keys()))
+
+    # 無條件寫（P1-2）
+    _write_latest_json(new_results, fetched_at_utc, failed_cities=failed_cities)
+    _append_obs_csv(new_results, failed_cities, fetched_at_utc)
+
+    log.info(
+        f"obs fetch: {len(new_results)} ok, {len(failed_cities)} fail "
+        f"(failed: {failed_cities if failed_cities else '-'})"
+    )
 
 
 def task_city_scan() -> bool:
     """12_city_scanner：掃描 Polymarket 城市，更新 city_status.json。"""
     log.info("=== [TASK] City Scan (12) ===")
     return run_script("12_city_scanner.py", label="12_city_scanner")
+
+
+MAX_BACKFILL_PER_CYCLE = 1  # 每輪最多回補幾個城市（避免阻塞 obs/forecast/truth）
 
 
 def task_backfill(cities: list[str], csm) -> None:
@@ -460,6 +612,12 @@ def run_collector(once: bool = False, verbose: bool = False) -> None:
         cycle_start = time.monotonic()
         log.info(f"--- Collector cycle @ {datetime.now(timezone.utc).strftime('%H:%M:%S')} ---")
 
+        # 0. 重置卡住的 backfilling 城市（被 kill 打斷的，超過 4 小時自動 reset）
+        stuck = csm.reset_stuck_backfilling(max_age_hours=4)
+        if stuck:
+            log.info(f"Auto-reset stuck backfilling cities: {stuck}")
+            csm = _load_csm()
+
         # 1. 城市掃描（每 24h）
         if scheduler.should_scan():
             ok = task_city_scan()
@@ -471,6 +629,10 @@ def run_collector(once: bool = False, verbose: bool = False) -> None:
                 reset = csm.reset_failed_cities()
                 if reset:
                     log.info(f"Auto-reset failed cities to discovered: {reset}")
+                # 掃描後也做 stuck backfilling reset（防止殘留）
+                stuck = csm.reset_stuck_backfilling(max_age_hours=4)
+                if stuck:
+                    log.info(f"Auto-reset stuck backfilling (post-scan): {stuck}")
                 _update_system_health("collector_main", {
                     "status": "running",
                     "pid": os.getpid(),
@@ -481,11 +643,16 @@ def run_collector(once: bool = False, verbose: bool = False) -> None:
                 log.warning("City scan failed — will retry next cycle")
                 error_reporter.report("collector_main", "12_city_scanner 失敗", "collector_scan_fail")
 
-        # 2. 回補 discovered 城市（即時觸發）
+        # 2. 回補 discovered 城市（每輪最多 MAX_BACKFILL_PER_CYCLE 個，避免阻塞排程）
         discovered = csm.get_cities_by_status("discovered")
         if discovered:
-            log.info(f"Discovered cities to backfill: {discovered}")
-            task_backfill(discovered, csm)
+            batch = discovered[:MAX_BACKFILL_PER_CYCLE]
+            remaining = len(discovered) - len(batch)
+            if remaining:
+                log.info(f"Backfill batch: {batch} (remaining queue: {remaining} cities)")
+            else:
+                log.info(f"Backfill batch: {batch}")
+            task_backfill(batch, csm)
             csm = _load_csm()  # reload after backfill
 
         # 3. Forecast 更新（每 6h）

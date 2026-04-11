@@ -148,6 +148,19 @@ def backfill_city(
     log.info(f"Backfilling: {city}")
     log.info(f"{'='*55}")
 
+    # 二次檢查：disabled 城市不回補（即使被誤 reset 進 discovered）
+    seed_path = PROJ_DIR / "config" / "seed_cities.json"
+    if seed_path.exists():
+        try:
+            seed = json.loads(seed_path.read_text(encoding="utf-8"))
+            city_seed = seed.get(city, {})
+            city_enabled = city_seed.get("city_enabled", True)
+            if city_enabled is False or str(city_enabled).lower() == "false":
+                log.warning(f"  {city}: SKIP backfill — city_enabled=false in seed")
+                return False
+        except Exception as e:
+            log.warning(f"  {city}: seed_cities check failed: {e} (proceeding anyway)")
+
     try:
         csm.set_backfilling(city)
     except ValueError as e:
@@ -389,8 +402,12 @@ def run(
         # Transition failed → backfilling is allowed via set_backfilling(force=True) approach
         # Actually VALID_TRANSITIONS allows failed → backfilling, so no force needed
     else:
-        target_cities = csm.get_cities_by_status("discovered")
-        log.info(f"Discovered cities to backfill: {target_cities}")
+        # 預設批次包含 discovered + backfilling（backfilling = 被 kill 打斷後 reset 回來的）
+        target_cities = sorted(set(
+            csm.get_cities_by_status("discovered") +
+            csm.get_cities_by_status("backfilling")
+        ))
+        log.info(f"Discovered+backfilling cities to backfill: {target_cities}")
 
     if not target_cities:
         log.info("No cities to backfill.")

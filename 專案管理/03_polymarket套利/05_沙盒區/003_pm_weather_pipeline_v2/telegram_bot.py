@@ -243,8 +243,14 @@ ADMIN_DEL_CONFIRM = 8
 # 工具函數
 # ============================================================
 
-def _safe_float(v, default: float = 0.0) -> float:
-    if v is None:
+def _safe_float(v, default=0.0):
+    """
+    Safe float coercion. Returns `default` for None/empty/invalid input.
+
+    **P2-4**：signature 改成接受任意 default（`Optional[float]` 實務），
+    原本的型別註解 `default: float = 0.0` 與多處 `_safe_float(..., None)` 用法衝突。
+    """
+    if v is None or v == "":
         return default
     try:
         return float(v)
@@ -280,6 +286,26 @@ def _best_depth(row: dict) -> float:
     return max(_safe_float(row.get("yes_sweet_usd"), 0), _safe_float(row.get("no_sweet_usd"), 0))
 
 
+def _model_prob_str(row: dict) -> str:
+    """
+    模型機率字串（YES/NO 擇高顯示）。p_yes 缺失時回傳 "模型—"。
+
+    signal_reader._parse_row() 會把空字串轉成 None；若直接走 _safe_float() 預設 0.0，
+    會造成「沒資料卻顯示模型NO 100%」的假訊號。這裡明確檢查 None/空字串。
+    """
+    raw = row.get("p_yes")
+    if raw is None or raw == "":
+        return "模型—"
+    try:
+        p_yes = float(raw)
+    except (TypeError, ValueError):
+        return "模型—"
+    p_no = 1.0 - p_yes
+    if p_yes >= p_no:
+        return f"模型YES {p_yes*100:.0f}%"
+    return f"模型NO {p_no*100:.0f}%"
+
+
 def _truncate(text: str, limit: int = 4000) -> str:
     if len(text) <= limit:
         return text
@@ -292,26 +318,25 @@ def _market_id_short(market_id: str) -> str:
 
 
 def _calc_settlement_hours(market_date_local: str, city_tz: str = "") -> Optional[float]:
-    """Returns hours until settlement (midnight at end of market_date_local in city timezone)."""
+    """
+    Returns hours until settlement (midnight at end of market_date_local in city timezone).
+
+    **P2-3**：拿掉 pytz fallback 路徑。pytz 需要 tz.localize(d) 才能正確 localize naive datetime，
+    直接 `datetime(..., tzinfo=pytz_tz)` 會套用 LMT（本地平均時）偏移，結果錯。
+    Python 3.9+ 都有 ZoneInfo，無需 pytz。
+    """
     if not market_date_local:
         return None
     try:
-        from datetime import timedelta
-        tz = timezone.utc
-        if city_tz:
-            try:
-                from zoneinfo import ZoneInfo
-                tz = ZoneInfo(city_tz)
-            except Exception:
-                try:
-                    import pytz
-                    tz = pytz.timezone(city_tz)
-                except Exception:
-                    tz = timezone.utc
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(city_tz) if city_tz else timezone.utc
         d = datetime.strptime(market_date_local, "%Y-%m-%d")
-        settlement = datetime(d.year, d.month, d.day, tzinfo=tz) + timedelta(days=1)
-        return (settlement - datetime.now(timezone.utc)).total_seconds() / 3600
-    except Exception:
+        # 結算時刻 = market_date 的隔天 00:00 local
+        settlement_local = datetime(d.year, d.month, d.day, tzinfo=tz) + timedelta(days=1)
+        settlement_utc = settlement_local.astimezone(timezone.utc)
+        return (settlement_utc - datetime.now(timezone.utc)).total_seconds() / 3600
+    except Exception as e:
+        log.debug(f"_calc_settlement_hours({market_date_local}, {city_tz}): {e}")
         return None
 
 
@@ -383,17 +408,50 @@ def _fmt_taipei(utc_dt: datetime) -> str:
 
 
 def _fmt_taipei_from_timestamp(ts) -> str:
-    """Unix timestamp 或 ISO 字串 → '04/11 07:00'（台北時間）。解析失敗回傳空字串。"""
+    """
+    Unix timestamp（int/float/numeric str）或 ISO 字串 → '04/11 07:00'（台北時間）。
+    失敗回傳空字串。
+
+    **P1-4**：WU v3 的 validTimeUtc 是 epoch 秒；collector 存成 int，但舊 latest_obs.json
+    可能殘留 stringified int（"1712846700"）。這裡同時接受 int/float/numeric string/ISO。
+    """
+    if ts is None or ts == "":
+        return ""
+    # int/float：直接用
     if isinstance(ts, (int, float)):
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    elif isinstance(ts, str) and ts:
         try:
-            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+            return _fmt_taipei(dt)
+        except (ValueError, OSError):
+            return ""
+    # string：先試 numeric epoch，再試 ISO
+    if isinstance(ts, str):
+        s = ts.strip()
+        if not s:
+            return ""
+        # 純數字 → epoch
+        if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+            try:
+                dt = datetime.fromtimestamp(int(s), tz=timezone.utc)
+                return _fmt_taipei(dt)
+            except (ValueError, OSError):
+                return ""
+        # 帶小數點的數字字串
+        try:
+            f = float(s)
+            # 粗略 sanity：epoch 秒 > 1e9（2001+）
+            if f > 1e9:
+                dt = datetime.fromtimestamp(f, tz=timezone.utc)
+                return _fmt_taipei(dt)
+        except ValueError:
+            pass
+        # ISO
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return _fmt_taipei(dt)
         except ValueError:
             return ""
-    else:
-        return ""
-    return _fmt_taipei(dt)
+    return ""
 
 
 def _calc_settlement_taipei(market_date_str: str, city_tz_str: str) -> str:
@@ -411,26 +469,25 @@ def _calc_settlement_taipei(market_date_str: str, city_tz_str: str) -> str:
 
 
 def _read_latest_obs() -> dict:
-    """讀 data/observations/latest_obs.json → {city: obs_dict}。失敗回傳空 dict。"""
+    """讀 data/observations/latest_obs.json → {city: obs_dict}。失敗回傳空 dict。
+
+    **P2-5**：JSON 解析失敗時記 log.warning，避免檔案損壞時 Bot 無聲無息什麼都顯示不出來。
+    """
     obs_path = PROJ_DIR / "data" / "observations" / "latest_obs.json"
     if not obs_path.exists():
         return {}
     try:
         raw = json.loads(obs_path.read_text(encoding="utf-8"))
-        return raw.get("cities", raw)
-    except Exception:
+        return raw.get("cities", raw) if isinstance(raw, dict) else {}
+    except Exception as e:
+        log.warning(f"_read_latest_obs: parse failed ({e}) — returning empty")
         return {}
 
 
-def _read_signal_summary() -> dict:
-    """讀 data/results/signal_summary.json（signal_main 每輪預計算）。失敗回傳空 dict。"""
-    path = PROJ_DIR / "data" / "results" / "signal_summary.json"
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+# Note: 舊版規劃過 data/results/signal_summary.json 作為預計算 JSON 快取，但
+# signal_main 從未實作此 writer。Bot 改透過 SignalDataReader 直讀 per-city
+# ev_signals.csv，並由 reader 內部的 mtime cache 提供同等的「讀記憶體」效能（v7.3.9）。
+# 此處移除 _read_signal_summary 與 4 個 handler 的 fallback 分支。
 
 
 _MONTH_TO_SEASON = {
@@ -484,9 +541,18 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
         now_local = datetime.now(tz)
         if md == now_local.date():
             current_hour = now_local.hour
-            if current_hour < start_local:
+            # P2-2：峰值窗口跨午夜處理（實務上天氣峰值多在下午，但仍應穩健）
+            if start_local <= end_local:
+                # 正常窗口（例如 13-17）
+                before_peak = current_hour < start_local
+                in_peak = start_local <= current_hour <= end_local
+            else:
+                # 跨午夜窗口（例如 22-02）
+                before_peak = end_local < current_hour < start_local
+                in_peak = current_hour >= start_local or current_hour <= end_local
+            if before_peak:
                 status = "⏳峰值前"
-            elif current_hour <= end_local:
+            elif in_peak:
                 status = "🔥峰值中"
             else:
                 status = "✅已過峰值"
@@ -931,10 +997,8 @@ class WeatherSignalBot:
                 d_str = f"  D${depth:.0f}" if depth and depth > 0 else ""
                 price_line = f"\n  {y_str} / {n_str}{d_str}"
 
-                # 模型方向與機率
-                p_yes = _safe_float(row.get("p_yes"))
-                p_no = 1 - p_yes
-                model_str = f"模型YES {p_yes*100:.0f}%" if p_yes >= p_no else f"模型NO {p_no*100:.0f}%"
+                # 模型方向與機率（p_yes 缺失時顯示「模型—」而非誤判 100%）
+                model_str = _model_prob_str(row)
 
                 if clipped:
                     line = f"{temp_str}  已鎖定（已超過）"
@@ -1050,23 +1114,10 @@ class WeatherSignalBot:
         sort_by: str = "edge",
         offset: int = 0,
     ) -> None:
-        summary = _read_signal_summary()
-        if summary:
-            rows = list(summary.get("ranking", []))
-            if sort_by == "depth":
-                rows.sort(
-                    key=lambda r: max(
-                        _safe_float(r.get("yes_sweet_usd")),
-                        _safe_float(r.get("no_sweet_usd")),
-                    ),
-                    reverse=True,
-                )
-            total = len(rows)
-            results = rows[offset: offset + self.page_size]
-        else:
-            results, total = self.reader.get_all_signals_ranked(
-                sort_by=sort_by, limit=self.page_size, offset=offset
-            )
+        # Reader 內部 mtime cache（v7.3.9）讓重複按按鈕直接從記憶體回
+        results, total = self.reader.get_all_signals_ranked(
+            sort_by=sort_by, limit=self.page_size, offset=offset
+        )
         sort_label = {"edge": "價差排名", "depth": "深度排名"}.get(sort_by, sort_by)
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
@@ -1081,23 +1132,9 @@ class WeatherSignalBot:
         sort_by: str = "edge",
         offset: int = 0,
     ) -> None:
-        summary = _read_signal_summary()
-        if summary:
-            rows = list(summary.get("today", []))
-            if sort_by == "depth":
-                rows.sort(
-                    key=lambda r: max(
-                        _safe_float(r.get("yes_sweet_usd")),
-                        _safe_float(r.get("no_sweet_usd")),
-                    ),
-                    reverse=True,
-                )
-            total = len(rows)
-            results = rows[offset: offset + self.page_size]
-        else:
-            results, total = self.reader.get_today_signals_ranked(
-                sort_by=sort_by, limit=self.page_size, offset=offset
-            )
+        results, total = self.reader.get_today_signals_ranked(
+            sort_by=sort_by, limit=self.page_size, offset=offset
+        )
         sort_label = {"edge": "📋 今日信號（8-24小時）", "depth": "📋 今日信號（8-24小時·深度）"}.get(sort_by, "📋 今日信號（8-24小時）")
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
@@ -1113,23 +1150,9 @@ class WeatherSignalBot:
         sort_by: str = "edge",
         offset: int = 0,
     ) -> None:
-        summary = _read_signal_summary()
-        if summary:
-            rows = list(summary.get("warning", []))
-            if sort_by == "depth":
-                rows.sort(
-                    key=lambda r: max(
-                        _safe_float(r.get("yes_sweet_usd")),
-                        _safe_float(r.get("no_sweet_usd")),
-                    ),
-                    reverse=True,
-                )
-            total = len(rows)
-            results = rows[offset: offset + self.page_size]
-        else:
-            results, total = self.reader.get_warning_signals_ranked(
-                sort_by=sort_by, limit=self.page_size, offset=offset
-            )
+        results, total = self.reader.get_warning_signals_ranked(
+            sort_by=sort_by, limit=self.page_size, offset=offset
+        )
         sort_label = {"edge": "⚠️ 預警（6-8小時）", "depth": "⚠️ 預警（6-8小時·深度）"}.get(sort_by, "⚠️ 預警（6-8小時）")
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
@@ -1613,12 +1636,20 @@ class WeatherSignalBot:
         # 建議進場價（ask price）
         if side == "NO":
             suggested = row.get("no_ask_price")
-            token_id = row.get("no_token_id", "")
+            token_id = row.get("no_token_id", "") or ""
             edge = row.get("no_edge")
         else:
             suggested = row.get("yes_ask_price")
-            token_id = row.get("yes_token_id", "")
+            token_id = row.get("yes_token_id", "") or ""
             edge = row.get("yes_edge")
+
+        # 守門：market_master.csv 缺 token_id 時拒絕進場（避免持倉無法下單）
+        if not token_id:
+            await update.callback_query.answer(
+                "❌ 此市場 token_id 缺失，無法記錄進場。請檢查 market_master.csv",
+                show_alert=True,
+            )
+            return ConversationHandler.END
 
         context.user_data["entry_token_id"] = token_id
         context.user_data["entry_suggested_price"] = suggested
@@ -1856,6 +1887,10 @@ class WeatherSignalBot:
                     InlineKeyboardButton("🏠", callback_data="menu"),
                 ]]),
             )
+        except ValueError as e:
+            # 例如 market_id / token_id 缺失（position_manager 的硬守門）
+            log.warning(f"confirm_entry ValueError: {e}")
+            await update.callback_query.answer(f"❌ {e}", show_alert=True)
         except Exception as e:
             log.error(f"confirm_entry error: {e}")
             await update.callback_query.answer("❌ 記錄失敗，請重試")
@@ -1955,59 +1990,38 @@ class WeatherSignalBot:
     async def _handle_settling(
         self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
     ) -> None:
-        """讀 signal_summary.json 的 settling 組顯示結算中頁面（fallback：掃描 CSV）。"""
-        summary = _read_signal_summary()
-        if summary:
-            # 快速路徑：讀預計算 JSON（< 1ms）
-            settling_groups = summary.get("settling", [])
-            if not settling_groups:
-                await update.message.reply_text(
-                    "<b>結算&lt;6h</b>\n目前沒有即將結算的合約",
-                    parse_mode="HTML",
-                )
-                return
-            for entry in settling_groups:
-                msg = self._render_settling_page(
-                    entry["city"],
-                    entry["market_date"],
-                    entry["hours_to_settlement"],
-                    preloaded_rows=entry.get("rows", []),
-                )
-                await update.message.reply_text(msg, parse_mode="HTML")
-        else:
-            # Fallback：signal_summary 不存在時掃 CSV
-            settling: list[tuple[str, str, float]] = []
-            for city in self.reader.get_ready_cities():
-                city_tz = self.reader.get_city_timezone(city)
-                for d in self.reader.get_available_dates(city):
-                    h = _calc_settlement_hours(d, city_tz=city_tz)
-                    if h is not None and 0 < h < 6:
-                        settling.append((city, d, h))
-            if not settling:
-                await update.message.reply_text(
-                    "<b>結算&lt;6h</b>\n目前沒有即將結算的合約",
-                    parse_mode="HTML",
-                )
-                return
-            settling.sort(key=lambda x: x[2])
-            for city, market_date, hours in settling:
-                msg = self._render_settling_page(city, market_date, hours)
-                await update.message.reply_text(msg, parse_mode="HTML")
+        """掃描 ev_signals 找 < 6h 的城市並顯示結算中頁面。
+
+        Reader 內部 mtime cache（v7.3.9）讓重複按按鈕的 N 個城市掃描接近免費。
+        """
+        settling: list[tuple[str, str, float]] = []
+        for city in self.reader.get_ready_cities():
+            city_tz = self.reader.get_city_timezone(city)
+            for d in self.reader.get_available_dates(city):
+                h = _calc_settlement_hours(d, city_tz=city_tz)
+                if h is not None and 0 < h < 6:
+                    settling.append((city, d, h))
+        if not settling:
+            await update.message.reply_text(
+                "<b>結算&lt;6h</b>\n目前沒有即將結算的合約",
+                parse_mode="HTML",
+            )
+            return
+        settling.sort(key=lambda x: x[2])
+        for city, market_date, hours in settling:
+            msg = self._render_settling_page(city, market_date, hours)
+            await update.message.reply_text(msg, parse_mode="HTML")
 
     def _render_settling_page(
         self,
         city: str,
         market_date: str,
         hours: float,
-        preloaded_rows: "list[dict] | None" = None,
     ) -> str:
-        """渲染單一城市的結算中頁面。
-
-        preloaded_rows: 若傳入則直接使用（來自 signal_summary.json），否則讀 CSV。
-        """
+        """渲染單一城市的結算中頁面。Reader cache 讓 get_city_signals 通常是 hit。"""
         city_tz = self.reader.get_city_timezone(city)
         settlement_taipei = _calc_settlement_taipei(market_date, city_tz)
-        rows = preloaded_rows if preloaded_rows is not None else self.reader.get_city_signals(city, market_date)
+        rows = self.reader.get_city_signals(city, market_date)
 
         # 結算倒數顯示
         if hours < 1:
@@ -2104,9 +2118,7 @@ class WeatherSignalBot:
                 yes_e = _safe_float(r.get("yes_edge"), 0.0) or 0.0
                 no_e = _safe_float(r.get("no_edge"), 0.0) or 0.0
 
-                p_yes = _safe_float(r.get("p_yes"))
-                p_no = 1 - p_yes
-                model_str = f"模型YES {p_yes*100:.0f}%" if p_yes >= p_no else f"模型NO {p_no*100:.0f}%"
+                model_str = _model_prob_str(r)
                 y = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
                 n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
 

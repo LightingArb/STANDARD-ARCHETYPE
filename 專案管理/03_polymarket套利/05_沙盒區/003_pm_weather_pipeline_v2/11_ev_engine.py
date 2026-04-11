@@ -59,11 +59,15 @@ OUTPUT_FIELDS = [
     "range_low",
     "range_high",
     "temp_unit",
+    "precision_half",   # 原始單位（供 obs clipping 用）
     "model_name",
     "model_scope",
     "predicted_daily_high",
     "lead_day",
     "lead_hours_to_settlement",
+    "bucket_used",
+    "bucket_level_used",
+    "bucket_sample_count",
     "p_yes",
     "p_no",
     "yes_ask_price",
@@ -78,6 +82,8 @@ OUTPUT_FIELDS = [
     "no_ev",
     "naive_fair_yes",
     "naive_fair_no",
+    "fair_exit_yes",    # p_yes 扣出場手續費（給 Trailing TP 用的理論出場價）
+    "fair_exit_no",     # p_no 扣出場手續費
     "signal",           # 向後相容，值 = signal_action
     "kelly_fraction_yes",
     "kelly_fraction_no",
@@ -122,6 +128,9 @@ OUTPUT_FIELDS = [
     "observation_clipped",
     "clip_reason",
     "observation_source",
+    # 版本追蹤（P0-6：偵測 probability/ev_signals 脫鉤）
+    "generated_utc",           # 本輪 11 產生此 row 的 UTC 時間
+    "upstream_generated_utc",  # 10 產生 probability 的 UTC 時間（從 prow 帶上來）
 ]
 
 STALE_PRICE_THRESHOLD = 300  # 秒，超過此值 price_status = "stale"
@@ -191,11 +200,14 @@ def _apply_observation_clipping(
 
     只對「城市當地今天」的市場做裁剪。修改 out_row in-place。
 
-    裁剪規則：
-      exact:  threshold < observed → p_yes=0, p_no=1（已超過，不可能剛好等於）
-      below:  threshold <= observed → p_yes=0, p_no=1（已達到或超過，不可能低於）
-      higher: threshold < observed → p_yes=1, p_no=0（已確定超過門檻）
-      range:  range_high < observed → p_yes=0, p_no=1（已超過區間上限）
+    重點：邊界要考慮 precision_half，與 10_event_probability 的機率計算對齊。
+    precision_half 由 10 寫入 CSV（原始單位 F 或 C），這裡直接使用。
+
+    YES 窗口（與 10 的 compute_p_yes 一致）：
+      exact X:   actual ∈ [X-h, X+h)     → clip NO 當 observed >= X+h
+      range L-H: actual ∈ [L-h, H+h)     → clip NO 當 observed >= H+h
+      higher X:  actual >= X-h           → clip YES 當 observed >= X-h
+      below X:   actual <  X+h           → clip NO 當 observed >= X+h
     """
     city = out_row.get("city", "")
     market_date = out_row.get("market_date_local", "")
@@ -218,8 +230,28 @@ def _apply_observation_clipping(
         return
 
     obs_info = current_obs.get(city)
-    if not obs_info or "high_c" not in obs_info:
+    if not obs_info or obs_info.get("high_c") is None:
         return
+
+    # P1-1：TTL 檢查 — 不管資料多舊都 clip 是危險的。
+    # 即使物理上「最大溫只會增加」讓 stale 資料偏向 under-clip（安全方向），
+    # 但跨日殘留 / schema bug 造成的 stale 可能完全錯方向。
+    # 條件：
+    #   1. status == "stale"（collector_main 標記的）→ 直接跳過
+    #   2. obs_time_utc 超過 2 小時 → 跳過
+    if str(obs_info.get("status", "ok")).lower() == "stale":
+        log.debug(f"  obs clip skip: {city} status=stale")
+        return
+    obs_time_utc = obs_info.get("obs_time_utc")
+    if obs_time_utc is not None:
+        try:
+            obs_epoch = float(obs_time_utc)
+            age_hours = (datetime.now(timezone.utc).timestamp() - obs_epoch) / 3600.0
+            if age_hours > 2.0:
+                log.debug(f"  obs clip skip: {city} obs_time age={age_hours:.1f}h > 2h")
+                return
+        except (TypeError, ValueError):
+            pass  # 無法解析就不做 TTL 檢查，退回原邏輯
 
     observed_high_c = float(obs_info["high_c"])
     obs_source = obs_info.get("source", "unknown")
@@ -236,37 +268,45 @@ def _apply_observation_clipping(
     threshold = safe_float(out_row.get("threshold"))
     range_high = safe_float(out_row.get("range_high"))
     range_low = safe_float(out_row.get("range_low"))
+    # precision_half 由 10 寫入（原始單位，F 或 C），fallback 0.5 = 1° precision
+    half = safe_float(out_row.get("precision_half"))
+    if half is None:
+        half = 0.5
 
     clipped = False
     clip_reason = ""
 
     if market_type == "exact":
-        if threshold is not None and threshold < observed_compare:
+        # YES 窗口上界 = threshold + half。observed >= 上界 → 不可能落入窗口 → clip NO
+        if threshold is not None and observed_compare >= threshold + half:
             out_row["p_yes"] = 0.0
             out_row["p_no"] = 1.0
             clipped = True
-            clip_reason = f"exact {threshold} < obs {observed_compare:.1f}"
+            clip_reason = f"exact {threshold}±{half} < obs {observed_compare:.1f}"
 
     elif market_type == "below":
-        if threshold is not None and threshold <= observed_compare:
+        # YES 窗口上界 = threshold + half
+        if threshold is not None and observed_compare >= threshold + half:
             out_row["p_yes"] = 0.0
             out_row["p_no"] = 1.0
             clipped = True
-            clip_reason = f"below {threshold} <= obs {observed_compare:.1f}"
+            clip_reason = f"below {threshold}+{half} <= obs {observed_compare:.1f}"
 
     elif market_type == "higher":
-        if threshold is not None and threshold < observed_compare:
+        # YES 下界 = threshold - half。observed >= 下界 → 確定落入 YES → clip YES
+        if threshold is not None and observed_compare >= threshold - half:
             out_row["p_yes"] = 1.0
             out_row["p_no"] = 0.0
             clipped = True
-            clip_reason = f"higher {threshold} < obs {observed_compare:.1f}"
+            clip_reason = f"higher {threshold}-{half} <= obs {observed_compare:.1f}"
 
     elif market_type == "range":
-        if range_high is not None and range_high < observed_compare:
+        # YES 窗口上界 = range_high + half
+        if range_high is not None and observed_compare >= range_high + half:
             out_row["p_yes"] = 0.0
             out_row["p_no"] = 1.0
             clipped = True
-            clip_reason = f"range_high {range_high} < obs {observed_compare:.1f}"
+            clip_reason = f"range_high {range_high}+{half} < obs {observed_compare:.1f}"
 
     out_row["observed_high_c"] = round(observed_high_c, 1)
     out_row["observation_source"] = obs_source
@@ -597,6 +637,9 @@ def run(
     log.info(f"⚠️  {MODEL_SCOPE} — 僅供管線驗證，不可用於交易決策")
     log.info("=" * 55)
 
+    # P0-6：本輪 run 的時間戳（所有 out_row 共用）
+    run_generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     cities_filter = {c.strip() for c in cities.split(",") if c.strip()} if cities else set()
 
     params = load_trading_params(PROJ_DIR / "config" / "trading_params.yaml")
@@ -616,10 +659,11 @@ def run(
     if _obs:
         log.info(f"Observation clipping enabled for: {sorted(_obs.keys())}")
 
-    signal_min_settlement_hours = float(params.get("signal_min_settlement_hours", 8))
+    signal_suppress_hours = float(params.get("signal_suppress_hours", 6))
+    signal_warning_hours = float(params.get("signal_warning_hours", 8))
     signal_extreme_price_threshold = float(params.get("signal_extreme_price_threshold", 0.95))
     log.info(f"Params: fee_rate={fee_rate}, fee_exponent={fee_exponent}, min_edge={min_edge}, depth_fixed_usd={depth_fixed_usd}")
-    log.info(f"Safety gates: min_settlement_hours={signal_min_settlement_hours}, extreme_price_threshold={signal_extreme_price_threshold}")
+    log.info(f"Safety gates: suppress_hours={signal_suppress_hours}, warning_hours={signal_warning_hours}, extreme_price_threshold={signal_extreme_price_threshold}")
     log.info(f"Fee basis: {fee_mode} / {fee_basis}")
 
     # book_state dir（STEP 6）
@@ -765,10 +809,14 @@ def run(
                 "range_low": prow.get("range_low", ""),
                 "range_high": prow.get("range_high", ""),
                 "temp_unit": prow.get("temp_unit", "C"),
+                "precision_half": prow.get("precision_half", ""),
                 "model_name": prow.get("model_name", model_name),
                 "model_scope": MODEL_SCOPE,
                 "predicted_daily_high": prow.get("predicted_daily_high", ""),
                 "lead_day": prow.get("lead_day", ""),
+                "bucket_used": prow.get("bucket_used", ""),
+                "bucket_level_used": prow.get("bucket_level_used", ""),
+                "bucket_sample_count": prow.get("bucket_sample_count", ""),
                 "p_yes": p_yes,
                 "p_no": p_no,
                 "naive_fair_yes": p_yes,
@@ -781,6 +829,8 @@ def run(
                 "price_status": price_status_market,
                 "price_age_seconds": price_age_display_market,
                 "book_source": book_source_market,
+                "generated_utc": run_generated_utc,
+                "upstream_generated_utc": prow.get("generated_utc", ""),
             }
 
             # 即時計算 lead_hours_to_settlement（不再依賴 probability CSV 欄位）
@@ -811,6 +861,17 @@ def run(
             p_yes = out_row["p_yes"]
             p_no = out_row["p_no"]
 
+            # ── fair_exit：扣出場 fee 後的理論出場價（供交易模組 Trailing TP 用）──
+            # 同時同步 naive_fair 為裁剪後的值（原本建構時是裁剪前的 p_yes/p_no）
+            out_row["naive_fair_yes"] = p_yes
+            out_row["naive_fair_no"] = p_no
+            out_row["fair_exit_yes"] = round(
+                max(0.0, p_yes - compute_fee(p_yes, fee_rate, fee_exponent)), 6
+            )
+            out_row["fair_exit_no"] = round(
+                max(0.0, p_no - compute_fee(p_no, fee_rate, fee_exponent)), 6
+            )
+
             if yes_ask is not None and no_ask is not None:
                 out_row["yes_ask_price"] = round(yes_ask, 6)
                 out_row["no_ask_price"] = round(no_ask, 6)
@@ -833,11 +894,14 @@ def run(
                 sig_action = get_signal_action(sig_status, out_row.get("signal", "NO_TRADE"))
 
                 # ── 安全閘門 1：距結算時間過短 ─────────────────────────────
-                if (sig_action != "SUPPRESSED"
-                        and lead_hours_to_settlement is not None
-                        and lead_hours_to_settlement < signal_min_settlement_hours):
-                    sig_status = "too_close_to_settlement"
-                    sig_action = "SUPPRESSED"
+                if sig_action != "SUPPRESSED" and lead_hours_to_settlement is not None:
+                    if lead_hours_to_settlement < signal_suppress_hours:
+                        # < 6h：完全壓制
+                        sig_status = "too_close_to_settlement"
+                        sig_action = "SUPPRESSED"
+                    elif lead_hours_to_settlement < signal_warning_hours:
+                        # 6-8h：顯示但標記最後預報警告（sig_action 保持正常）
+                        sig_status = "last_forecast_warning"
 
                 # ── 安全閘門 2：市場極端價格（已定局）────────────────────────
                 if sig_action != "SUPPRESSED":
@@ -915,7 +979,23 @@ def run(
         if output_rows:
             _write_output(city, output_rows)
         else:
-            log.warning(f"  {city}: 0 EV rows — skipping write (preserving existing)")
+            # P0-6：0 rows 時的脫鉤偵測
+            # 若上游 probability 已更新（generated_utc 更新），而現存 ev_signals 還帶舊版本，
+            # 保留舊檔會造成下游（Bot/交易模組）讀到不一致的資料。
+            # 這種情況下強制寫空檔，讓 ev_signals 的 mtime 追上 probability。
+            upstream_now = ""
+            if prob_rows:
+                upstream_now = prob_rows[0].get("generated_utc", "")
+            existing_upstream = _read_existing_upstream_version(city)
+            if upstream_now and existing_upstream and upstream_now != existing_upstream:
+                log.warning(
+                    f"  {city}: 0 EV rows AND upstream drift detected "
+                    f"(existing upstream={existing_upstream}, current={upstream_now}) "
+                    f"→ force-writing empty ev_signals to avoid stale data"
+                )
+                _write_output(city, [])
+            else:
+                log.warning(f"  {city}: 0 EV rows — skipping write (preserving existing)")
         all_rows.extend(output_rows)  # STEP 10：收集 in-memory 結果
         log.info(f"  {city}: {len(output_rows)} EV signal rows")
 
@@ -932,6 +1012,26 @@ def run(
 
     log.info("11_ev_engine done.")
     return (True, all_rows)
+
+
+def _read_existing_upstream_version(city: str) -> str:
+    """讀取現存 ev_signals.csv 的第一列 upstream_generated_utc。不存在或失敗則回傳空字串。
+
+    供 P0-6 的脫鉤偵測使用：比對目前 probability 的 generated_utc 與現存 ev_signals 的
+    upstream_generated_utc，若不一致代表上游已更新但下游還帶舊版本。
+    """
+    path = PROJ_DIR / "data" / "results" / "ev_signals" / city / "ev_signals.csv"
+    if not path.exists():
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            first = next(reader, None)
+            if first is None:
+                return ""
+            return first.get("upstream_generated_utc", "") or ""
+    except Exception:
+        return ""
 
 
 def _write_output(city: str, rows: list[dict]) -> None:

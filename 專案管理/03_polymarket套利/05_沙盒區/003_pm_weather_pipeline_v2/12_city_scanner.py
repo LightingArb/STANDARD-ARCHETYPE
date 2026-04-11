@@ -268,16 +268,23 @@ def run(verbose: bool = False) -> bool:
             # Exception: no_metadata → discovered if seed now has it
             if current_status == "no_metadata" and city in seed_cities and has_complete_metadata(seed_cities[city]):
                 seed = seed_cities[city]
-                csm.set_discovered(city, metadata={
-                    "timezone": seed.get("timezone", ""),
-                    "station_code": seed.get("station_code", ""),
-                    "country": seed.get("country", ""),
-                    "supported_metrics": ["daily_high"],
-                    "market_count_active": market_count,
-                }, force=False)
-                csm.update_scan_info(city, market_count, scan_time)
-                upgraded.append(city)
-                log.info(f"  {city}: no_metadata → discovered (metadata now available)")
+                # city_enabled 過濾：seed 明確禁用的城市不升級
+                city_enabled = seed.get("city_enabled", True)
+                if city_enabled is False or str(city_enabled).lower() == "false":
+                    log.info(f"  {city}: SKIP no_metadata→discovered — city_enabled=false in seed")
+                    csm.update_scan_info(city, market_count, scan_time)
+                    updated_existing.append(city)
+                else:
+                    csm.set_discovered(city, metadata={
+                        "timezone": seed.get("timezone", ""),
+                        "station_code": seed.get("station_code", ""),
+                        "country": seed.get("country", ""),
+                        "supported_metrics": ["daily_high"],
+                        "market_count_active": market_count,
+                    }, force=False)
+                    csm.update_scan_info(city, market_count, scan_time)
+                    upgraded.append(city)
+                    log.info(f"  {city}: no_metadata → discovered (metadata now available)")
             else:
                 csm.update_scan_info(city, market_count, scan_time)
                 updated_existing.append(city)
@@ -287,6 +294,11 @@ def run(verbose: bool = False) -> bool:
             # New city
             if city in seed_cities and has_complete_metadata(seed_cities[city]):
                 seed = seed_cities[city]
+                # city_enabled 過濾：seed 明確禁用的城市不 discovered
+                city_enabled = seed.get("city_enabled", True)
+                if city_enabled is False or str(city_enabled).lower() == "false":
+                    log.info(f"  {city}: SKIP NEW city — city_enabled=false in seed")
+                    continue
                 csm.set_discovered(city, metadata={
                     "timezone": seed.get("timezone", ""),
                     "station_code": seed.get("station_code", ""),

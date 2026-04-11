@@ -488,7 +488,88 @@ def run(cities: str, verbose: bool) -> bool:
     # Consistency check (non-blocking)
     verify_book_csv_consistency(book_states, csv_rows)
 
+    # P1-6：寫 price health（供 signal_main / 交易模組降級判斷）
+    _write_price_health(
+        total=len(markets),
+        ok=ok_count,
+        empty=empty_count,
+        failed=failed_count + exception_count,
+        no_token=no_token_count,
+        fetch_time_utc=fetch_time_utc,
+    )
+
     return True
+
+
+# ============================================================
+# P1-6：Price health output
+# ============================================================
+
+_PRICE_HEALTH_MIN_RATIO = 0.5  # 預設門檻，signal_main 可從 trading_params 覆寫
+
+
+def _write_price_health(
+    total: int,
+    ok: int,
+    empty: int,
+    failed: int,
+    no_token: int,
+    fetch_time_utc: str,
+) -> None:
+    """
+    寫 data/_price_health.json。signal_main 每輪先讀這個檔，ok_ratio 過低時降級。
+
+    格式：
+    {
+      "total": 10,
+      "ok": 8,
+      "empty_book": 1,
+      "failed": 1,
+      "no_token": 0,
+      "ok_ratio": 0.8,
+      "degraded": false,
+      "degraded_reason": "",
+      "fetch_time_utc": "2026-04-11T..."
+    }
+    """
+    # 排除 no_token 後的有效市場數（no_token 是 master 檔資料問題，非 fetch 問題）
+    effective_total = total - no_token
+    if effective_total > 0:
+        ok_ratio = ok / effective_total
+    else:
+        ok_ratio = 0.0
+
+    degraded = ok_ratio < _PRICE_HEALTH_MIN_RATIO
+    reason = ""
+    if degraded:
+        reason = (
+            f"ok_ratio={ok_ratio:.2f} < {_PRICE_HEALTH_MIN_RATIO} "
+            f"({ok}/{effective_total} effective markets)"
+        )
+
+    payload = {
+        "total": total,
+        "ok": ok,
+        "empty_book": empty,
+        "failed": failed,
+        "no_token": no_token,
+        "effective_total": effective_total,
+        "ok_ratio": round(ok_ratio, 4),
+        "degraded": degraded,
+        "degraded_reason": reason,
+        "threshold": _PRICE_HEALTH_MIN_RATIO,
+        "fetch_time_utc": fetch_time_utc,
+    }
+
+    try:
+        path = PROJ_DIR / "data" / "_price_health.json"
+        _atomic_write_json(path, payload)
+        if degraded:
+            log.warning(f"⚠️  PRICE HEALTH DEGRADED: {reason}")
+        else:
+            log.info(f"Price health: ok_ratio={ok_ratio:.2f} ({ok}/{effective_total})")
+    except Exception as e:
+        log.warning(f"_write_price_health failed: {e}")
 
 
 # ============================================================

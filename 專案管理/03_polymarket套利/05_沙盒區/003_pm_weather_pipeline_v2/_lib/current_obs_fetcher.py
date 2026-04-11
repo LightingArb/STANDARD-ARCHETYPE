@@ -58,29 +58,15 @@ class CurrentObsFetcher:
         self.settling_threshold = settling_hours_threshold  # 距結算幾小時以下算「結算中」
         self._cache: dict[str, dict] = {}  # {city: {high_c, fetched_at, obs_time, source}}
 
-    def fetch_current(self, city: str, station_code: str) -> Optional[dict]:
-        """
-        純 API call，不使用內部快取。供 collector_main 的 _run_obs_fetch 使用。
-        回傳 {high_c, current_temp_c, obs_time, source} 或 None（失敗時）。
-        """
-        try:
-            result = self._fetch_v3_current(station_code)
-        except Exception as e:
-            log.warning(f"fetch_current {city} ({station_code}): {e}")
-            return None
-        if result is None:
-            return None
-        return {
-            "high_c": result["high_c"],
-            "current_temp_c": result.get("current_temp_c"),
-            "obs_time": result["obs_time"],
-            "source": "v3_current",
-        }
-
     def _fetch_v3_current(self, station_code: str) -> Optional[dict]:
         """
         呼叫 WU v3 current observations by ICAO code。
-        回傳 {high_c, obs_time} 或 None（失敗時）。
+        回傳 {high_c, current_temp_c, obs_time_utc} 或 None（失敗時）。
+
+        WU v3 response 欄位：
+          temperatureMaxSince7Am  → 今天目前最高溫（high_c）
+          temperature             → 當下氣溫（current_temp_c）
+          validTimeUtc            → UNIX epoch 秒（int），存成 int 而非 str
         """
         import requests
         url = (
@@ -101,11 +87,28 @@ class CurrentObsFetcher:
             )
             return None
 
-        current_temp = data.get("temperature")
+        # 當下氣溫（P1-4：current_temp_c 不該等於 high_c）
+        current_temp_raw = data.get("temperature")
+        current_temp_c: Optional[float] = None
+        if current_temp_raw is not None:
+            try:
+                current_temp_c = float(current_temp_raw)
+            except (TypeError, ValueError):
+                current_temp_c = None
+
+        # validTimeUtc 是 epoch 秒（int）。轉成 int 而非 str
+        obs_time_utc: Optional[int] = None
+        valid_time_raw = data.get("validTimeUtc")
+        if valid_time_raw is not None:
+            try:
+                obs_time_utc = int(valid_time_raw)
+            except (TypeError, ValueError):
+                obs_time_utc = None
+
         return {
             "high_c": float(high_c),
-            "current_temp_c": float(current_temp) if current_temp is not None else None,
-            "obs_time": str(data.get("validTimeUtc", "")),
+            "current_temp_c": current_temp_c,
+            "obs_time_utc": obs_time_utc,  # int epoch or None
         }
 
     def get_current_high(
@@ -116,8 +119,12 @@ class CurrentObsFetcher:
     ) -> Optional[dict]:
         """
         取得城市今天目前最高溫（攝氏），帶快取。
+
+        **P1-5 fix**：fetcher 必須是長壽物件，每輪重建會讓 cache 永遠清空，TTL 形同虛設。
+        collector_main 現在啟動時建一次、跨輪重用。
+
         hours_to_settlement: 距結算剩餘小時數，< settling_threshold 時使用較短的 TTL。
-        回傳 {high_c, fetched_at, obs_time, source} 或 None（失敗時）。
+        回傳 {high_c, current_temp_c, fetched_at, obs_time_utc, source} 或 None（失敗時）。
         """
         # 動態 TTL：結算中城市用較短的 TTL
         is_settling = (
@@ -142,7 +149,8 @@ class CurrentObsFetcher:
 
         entry = {
             "high_c": result["high_c"],
-            "obs_time": result["obs_time"],
+            "current_temp_c": result.get("current_temp_c"),
+            "obs_time_utc": result.get("obs_time_utc"),  # int epoch or None
             "fetched_at": now,
             "source": "v3_current",
         }
@@ -155,14 +163,7 @@ class CurrentObsFetcher:
         cities_info: list[dict],
         hours_to_settlement_map: Optional[dict] = None,
     ) -> dict[str, dict]:
-        """
-        批次取得所有城市的即時最高溫。
-
-        cities_info: list of {city, station_code}
-        hours_to_settlement_map: {city: float}（距結算小時數，用於動態 TTL）
-        回傳: {city: {high_c, fetched_at, obs_time, source}}
-        失敗的城市靜默跳過，不在結果中。
-        """
+        """序列版（保留向後相容）。新程式碼應用 get_all_parallel()。"""
         result: dict[str, dict] = {}
         for info in cities_info:
             city = info.get("city", "")
@@ -173,4 +174,69 @@ class CurrentObsFetcher:
             obs = self.get_current_high(city, station_code, hours_to_settlement=hours)
             if obs:
                 result[city] = obs
+        return result
+
+    def get_all_parallel(
+        self,
+        cities_info: list[dict],
+        hours_to_settlement_map: Optional[dict] = None,
+        max_workers: int = 5,
+        total_budget_s: float = 300.0,
+    ) -> dict[str, dict]:
+        """
+        **P2-1**：並行批次抓取。20 城市 × 15s timeout 序列 = 5 分鐘，接近 10 分鐘觸發間隔。
+        並行 + 總預算保護避免整輪卡死。
+
+        cities_info: list of {city, station_code}
+        hours_to_settlement_map: {city: float}
+        max_workers: 並發數（預設 5，避免 WU API rate limit）
+        total_budget_s: 整輪總時間預算（秒），超過後不再等待剩餘 future
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        result: dict[str, dict] = {}
+        valid_infos = [
+            i for i in cities_info
+            if i.get("city") and i.get("station_code")
+        ]
+        if not valid_infos:
+            return result
+
+        start = time.time()
+
+        def _worker(info: dict) -> tuple[str, Optional[dict]]:
+            city = info["city"]
+            station = info["station_code"]
+            hours = (hours_to_settlement_map or {}).get(city)
+            obs = self.get_current_high(city, station, hours_to_settlement=hours)
+            return (city, obs)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_worker, info): info for info in valid_infos}
+            for fut in as_completed(futures):
+                elapsed = time.time() - start
+                remaining = total_budget_s - elapsed
+                if remaining <= 0:
+                    city = futures[fut].get("city", "?")
+                    log.warning(
+                        f"get_all_parallel: total budget {total_budget_s}s exhausted, "
+                        f"aborting ({city} and rest)"
+                    )
+                    # 取消尚未啟動的 future；已跑的會跑完但 result 不收
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    break
+                try:
+                    city, obs = fut.result(timeout=max(1.0, remaining))
+                    if obs:
+                        result[city] = obs
+                except Exception as e:
+                    info = futures[fut]
+                    log.warning(f"get_all_parallel worker {info.get('city')}: {e}")
+
+        log.info(
+            f"get_all_parallel: {len(result)}/{len(valid_infos)} ok in "
+            f"{time.time() - start:.1f}s"
+        )
         return result

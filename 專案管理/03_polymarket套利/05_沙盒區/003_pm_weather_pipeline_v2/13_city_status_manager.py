@@ -43,8 +43,8 @@ DEFAULT_STATUS_PATH = PROJ_DIR / "data" / "city_status.json"
 
 VALID_TRANSITIONS: dict[str, set[str]] = {
     "discovered":  {"backfilling", "disabled"},
-    "backfilling": {"ready", "failed"},
-    "failed":      {"backfilling", "discovered"},  # retry or full reset
+    "backfilling": {"ready", "failed", "discovered"},  # discovered: recovery from stuck
+    "failed":      {"backfilling", "discovered"},       # retry or full reset
     "ready":       {"disabled"},
     "no_metadata": {"discovered"},          # metadata 補齊後升級
     "disabled":    set(),                  # terminal unless manually overridden via --force
@@ -239,11 +239,16 @@ class CityStatusManager:
         now = _now_utc()
         self._data[city]["last_backfill_end_utc"] = now
         self._data[city]["last_ready_utc"] = now
+        self._data[city]["last_backfill_completed_utc"] = now
         self._data[city]["error_row_count"] = error_row_count
         if earliest_forecast_date is not None:
             self._data[city]["earliest_forecast_date"] = earliest_forecast_date
         if latest_forecast_date is not None:
             self._data[city]["latest_forecast_date"] = latest_forecast_date
+        # 清 stale metadata（回補成功後這些欄位已無意義）
+        for key in ["last_error", "note", "fail_reason", "failure_count",
+                    "recovery_reason", "recovery_at_utc"]:
+            self._data[city].pop(key, None)
         self._save()
 
     def set_failed(self, city: str, reason: str = "", force: bool = False) -> None:
@@ -270,6 +275,62 @@ class CityStatusManager:
         if reset:
             self._save()
         return reset
+
+    def reset_stuck_backfilling(self, max_age_hours: int = 4) -> list[str]:
+        """
+        把卡住的 backfilling 城市重置為 discovered。
+        判斷：backfilling 且 last_backfill_start_utc 超過 max_age_hours，或欄位不存在。
+        設計假設：單實例 collector，不允許並行手動 backfill。
+        回傳被重置的城市清單。
+        """
+        reset = []
+        now = datetime.now(timezone.utc)
+        for city, info in self._data.items():
+            if city.startswith("_"):
+                continue
+            if info.get("status") != "backfilling":
+                continue
+            start_str = info.get("last_backfill_start_utc", "")
+            is_stuck = True
+            if start_str:
+                try:
+                    start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                    age_hours = (now - start_dt).total_seconds() / 3600
+                    is_stuck = age_hours > max_age_hours
+                except Exception:
+                    is_stuck = True
+            if is_stuck:
+                try:
+                    self._transition(city, "discovered")
+                    self._data[city]["recovery_reason"] = "stuck_backfilling_timeout"
+                    self._data[city]["recovery_at_utc"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    reset.append(city)
+                    log.info(f"  {city}: backfilling → discovered (stuck >{max_age_hours}h)")
+                except ValueError as e:
+                    log.warning(f"  {city}: reset_stuck failed: {e}")
+        if reset:
+            self._save()
+        return reset
+
+    def set_disabled_batch(self, cities: list[str], reason: str = "") -> list[str]:
+        """批量設定城市為 disabled（允許從任何狀態強制進入）。"""
+        done = []
+        for city in cities:
+            if city not in self._data:
+                continue
+            current = self._data[city].get("status")
+            if current == "disabled":
+                continue
+            self._data[city]["status"] = "disabled"
+            self._data[city]["updated_at_utc"] = _now_utc()
+            self._data[city]["disabled_at_utc"] = _now_utc()
+            if reason:
+                self._data[city]["disabled_reason"] = reason
+            done.append(city)
+            log.info(f"  {city}: {current} → disabled ({reason})")
+        if done:
+            self._save()
+        return done
 
     def set_disabled(self, city: str, reason: str = "", force: bool = False) -> None:
         self._transition(city, "disabled", force=force)
