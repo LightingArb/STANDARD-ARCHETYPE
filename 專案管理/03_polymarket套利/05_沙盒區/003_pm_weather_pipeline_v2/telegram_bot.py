@@ -384,6 +384,17 @@ def _fmt_settlement(market_date_local: str, city_tz: str = "") -> str:
     return f"{minutes}分鐘"
 
 
+def _fmt_settlement_full(market_date_local: str, city_tz: str = "") -> str:
+    """結算：台北時間 MM/DD HH:MM（倒數X天X小時）"""
+    taipei_str = _calc_settlement_taipei(market_date_local, city_tz)
+    countdown = _fmt_settlement(market_date_local, city_tz=city_tz)
+    if countdown == "已結算":
+        return "結算：已結算"
+    if taipei_str:
+        return f"結算：台北時間 {taipei_str}（倒數{countdown}）"
+    return f"結算：（倒數{countdown}）"
+
+
 def _back_btn(label: str = "🔙 主選單") -> list:
     return [InlineKeyboardButton(label, callback_data="menu")]
 
@@ -452,6 +463,18 @@ def _fmt_taipei_from_timestamp(ts) -> str:
         except ValueError:
             return ""
     return ""
+
+
+def _fmt_obs_age(fetched_at_utc: str) -> str:
+    """Returns '（X分鐘前更新）' or empty string."""
+    if not fetched_at_utc:
+        return ""
+    try:
+        ft = datetime.fromisoformat(fetched_at_utc.replace("Z", "+00:00"))
+        age_min = int((datetime.now(timezone.utc) - ft).total_seconds() / 60)
+        return f"（{age_min}分鐘前更新）"
+    except Exception:
+        return ""
 
 
 def _calc_settlement_taipei(market_date_str: str, city_tz_str: str) -> str:
@@ -551,14 +574,17 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
                 before_peak = end_local < current_hour < start_local
                 in_peak = current_hour >= start_local or current_hour <= end_local
             if before_peak:
-                status = "⏳峰值前"
+                hours_to_peak = (start_dt - datetime.now(tz)).total_seconds() / 3600
+                h_int = max(0, int(hours_to_peak))
+                countdown_seg = f"（倒數{h_int}小時）" if h_int > 0 else ""
+                status = f"{countdown_seg}⏳峰值前"
             elif in_peak:
                 status = "🔥峰值中"
             else:
                 status = "✅已過峰值"
-            return f"峰值：台北{date_prefix} {start_taipei}-{end_taipei} {status}"
+            return f"峰值：台北時間 {date_prefix} {start_taipei}-{end_taipei} {status}"
         else:
-            return f"峰值：台北{date_prefix} {start_taipei}-{end_taipei}"
+            return f"峰值：台北時間 {date_prefix} {start_taipei}-{end_taipei}"
     except Exception:
         return ""
 
@@ -584,6 +610,68 @@ def _city_sort_key(row: dict):
     temp = range_low if market_type == "range" else threshold
     priority = _CITY_TYPE_PRIORITY.get(market_type, 1)
     return (temp, priority)
+
+
+def _fmt_contract_block(row: dict) -> str:
+    """
+    Unified contract display block (no leading indent on first line).
+    Trade lines (▶) have 2-space indent for visual hierarchy.
+
+    已鎖定:   "temp  已鎖定（已超過）"
+    無掛單:   "temp ▲ YES：P% / NO：Q%  無掛單"
+    價格過時: "temp ▲ YES：P% / NO：Q%  價格過時"
+    有價格:   "temp ▲ YES $X / NO $Y ▲ YES：P% / NO：Q%"
+              + "  ▶ 買YES  市場$X→$P（+E%）D$D"  (if yes_edge > 0.01)
+              + "  ▶ 買NO  市場$Y→$Q（+F%）D$D"   (if no_edge > 0.01)
+    """
+    temp_str = _fmt_contract_temp(row)
+    clipped = str(row.get("observation_clipped", "")).lower() == "true"
+
+    if clipped:
+        return f"{temp_str}  已鎖定（已超過）"
+
+    p_yes_raw = row.get("p_yes")
+    if p_yes_raw is not None and p_yes_raw != "":
+        try:
+            p_yes = float(p_yes_raw)
+            p_no = 1.0 - p_yes
+        except (ValueError, TypeError):
+            p_yes = p_no = None
+    else:
+        p_yes = p_no = None
+
+    prob_str = (
+        f"YES：{p_yes*100:.0f}% / NO：{p_no*100:.0f}%"
+        if p_yes is not None else "YES：—% / NO：—%"
+    )
+
+    yes_ask = _safe_float(row.get("yes_ask_price"), None)
+    no_ask = _safe_float(row.get("no_ask_price"), None)
+
+    if yes_ask is None and no_ask is None:
+        return f"{temp_str} ▲ {prob_str}  無掛單"
+
+    if row.get("signal_status", "") == "stale_price":
+        return f"{temp_str} ▲ {prob_str}  價格過時"
+
+    price_str = f"YES ${yes_ask:.2f} / NO ${no_ask:.2f}"
+    header = f"{temp_str} ▲ {price_str} ▲ {prob_str}"
+    lines = [header]
+
+    yes_edge = _safe_float(row.get("yes_edge"), 0.0)
+    no_edge = _safe_float(row.get("no_edge"), 0.0)
+
+    if yes_edge > 0.01 and p_yes is not None and yes_ask is not None:
+        yes_depth = _safe_float(row.get("yes_sweet_usd"), 0) or _safe_float(row.get("yes_depth_usd"), 0)
+        d_str = f"D${yes_depth:.0f}" if yes_depth > 0 else ""
+        lines.append(f"  ▶ 買YES  市場${yes_ask:.2f}→${p_yes:.2f}（+{yes_edge*100:.1f}%）{d_str}".rstrip())
+
+    if no_edge > 0.01 and p_no is not None and no_ask is not None:
+        no_depth = _safe_float(row.get("no_sweet_usd"), 0) or _safe_float(row.get("no_depth_usd"), 0)
+        d_str = f"D${no_depth:.0f}" if no_depth > 0 else ""
+        lines.append(f"  ▶ 買NO  市場${no_ask:.2f}→${p_no:.2f}（+{no_edge*100:.1f}%）{d_str}".rstrip())
+
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -878,85 +966,58 @@ class WeatherSignalBot:
         all_signals = self.reader.get_city_signals(city, date if date else None)
 
         # === 標題 ===
-        settlement_countdown = _fmt_settlement(date, city_tz=city_tz)
-        settlement_taipei = _calc_settlement_taipei(date, city_tz)
         settlement_hours = _calc_settlement_hours(date, city_tz=city_tz)
+        _h = settlement_hours if settlement_hours is not None else 999
 
-        if settlement_taipei:
-            header = f"<b>{city}</b> — {_fmt_date(date)}\n結算倒數：{settlement_countdown}（台北 {settlement_taipei} 結算）"
-        else:
-            header = f"<b>{city}</b> — {_fmt_date(date)}\n結算倒數：{settlement_countdown}"
+        header = f"<b>{city}</b> — {_fmt_date(date)}\n{_fmt_settlement_full(date, city_tz)}"
 
-        # 從 all_signals 取預報最高溫；觀測最高溫優先讀 latest_obs.json
+        # 預報最高溫（從 signal rows 取）
         _pred_high_c = None
-        _obs_high_c = None
         _obs_unit = "C"
-        _obs_time_str = ""
-        _obs_fetch_age = ""
         for _r in all_signals:
-            if _pred_high_c is None:
-                _praw = _r.get("predicted_daily_high", "")
-                if _praw not in ("", None):
-                    try:
-                        _pred_high_c = float(_praw)
-                        _obs_unit = _r.get("temp_unit", "C")
-                    except (ValueError, TypeError):
-                        pass
-            if _obs_high_c is None:
+            _praw = _r.get("predicted_daily_high", "")
+            if _praw not in ("", None):
+                try:
+                    _pred_high_c = float(_praw)
+                    _obs_unit = _r.get("temp_unit", "C")
+                    break
+                except (ValueError, TypeError):
+                    pass
+
+        def _fmt_temp_val(c_val: float, unit: str) -> str:
+            return f"{c_val * 9/5 + 32:.1f}°F" if unit == "F" else f"{c_val:.1f}°C"
+
+        # 實況（優先 latest_obs.json，fallback signal rows）
+        _obs_high_c = None
+        _obs_age_str = ""
+        _latest = _read_latest_obs().get(city, {})
+        if _latest.get("status") == "ok" and _latest.get("high_c") is not None:
+            _obs_high_c = float(_latest["high_c"])
+            _obs_age_str = _fmt_obs_age(_latest.get("fetched_at_utc", ""))
+        else:
+            for _r in all_signals:
                 _oraw = _r.get("observed_high_c", "")
                 if _oraw not in ("", None):
                     try:
                         _obs_high_c = float(_oraw)
                         _obs_unit = _r.get("temp_unit", "C")
-                        _obs_time_str = _fmt_taipei_from_timestamp(_r.get("obs_time", ""))
+                        break
                     except (ValueError, TypeError):
                         pass
-            if _pred_high_c is not None and _obs_high_c is not None:
-                break
-
-        # 覆蓋：若 latest_obs.json 有更新的觀測資料則優先使用
-        _latest = _read_latest_obs().get(city, {})
-        if _latest.get("status") == "ok" and _latest.get("high_c") is not None:
-            _obs_high_c = float(_latest["high_c"])
-            _obs_time_str = _fmt_taipei_from_timestamp(_latest.get("obs_time_utc", ""))
-            _fetched_at = _latest.get("fetched_at_utc", "")
-            if _fetched_at:
-                try:
-                    _ft = datetime.fromisoformat(_fetched_at.replace("Z", "+00:00"))
-                    _age_min = int((datetime.now(timezone.utc) - _ft).total_seconds() / 60)
-                    _obs_fetch_age = f"，{_age_min}分鐘前抓取"
-                except Exception:
-                    pass
 
         # 條件式溫度顯示（依結算距離決定顯示哪些欄位）
         # > 24h: 只顯示預報  8-24h: 預報+實況  < 6h: 只顯示實況
-        _h = settlement_hours if settlement_hours is not None else 999
-
-        def _fmt_temp_val(c_val: float, unit: str) -> str:
-            return f"{c_val * 9/5 + 32:.1f}°F" if unit == "F" else f"{c_val:.1f}°C"
-
-        def _build_obs_line(c_val, unit, time_str, fetch_age):
-            line = f"實況：{_fmt_temp_val(c_val, unit)}"
-            if time_str:
-                line += f"（台北 {time_str} 觀測{fetch_age}）"
-            elif fetch_age:
-                line += f"（{fetch_age.lstrip('，')}）"
-            return line
-
         if _h > 24:
-            # 只顯示預報
             if _pred_high_c is not None:
                 header += f"\n預報：{_fmt_temp_val(_pred_high_c, _obs_unit)}"
         elif _h >= 6:
-            # 預報 + 實況（8-24h 區間，6h 以上）
             if _pred_high_c is not None:
                 header += f"\n預報：{_fmt_temp_val(_pred_high_c, _obs_unit)}"
             if _obs_high_c is not None:
-                header += f"\n{_build_obs_line(_obs_high_c, _obs_unit, _obs_time_str, _obs_fetch_age)}"
+                header += f"\n實況：{_fmt_temp_val(_obs_high_c, _obs_unit)}{_obs_age_str}"
         else:
-            # < 6h：只顯示實況
             if _obs_high_c is not None:
-                header += f"\n{_build_obs_line(_obs_high_c, _obs_unit, _obs_time_str, _obs_fetch_age)}"
+                header += f"\n實況：{_fmt_temp_val(_obs_high_c, _obs_unit)}{_obs_age_str}"
 
         # 峰值時段
         _peak = _get_peak_info(city, date, city_tz)
@@ -969,55 +1030,7 @@ class WeatherSignalBot:
         if not sorted_signals:
             body = "（無合約資料）"
         else:
-            rows_text = []
-            for row in sorted_signals:
-                action = row.get("signal_action", "")
-                temp_str = _fmt_contract_temp(row)
-
-                # YES/NO 價格
-                yes_ask = _safe_float(row.get("yes_ask_price"), None)
-                no_ask = _safe_float(row.get("no_ask_price"), None)
-
-                # 深度：優先 sweet_usd，fallback depth_usd
-                yes_e = _safe_float(row.get("yes_edge"), 0.0)
-                no_e = _safe_float(row.get("no_edge"), 0.0)
-                if yes_e >= no_e and yes_e > 0:
-                    depth = _safe_float(row.get("yes_sweet_usd"), 0) or _safe_float(row.get("yes_depth_usd"), 0)
-                elif no_e > 0:
-                    depth = _safe_float(row.get("no_sweet_usd"), 0) or _safe_float(row.get("no_depth_usd"), 0)
-                else:
-                    depth = 0.0
-
-                # 狀態分類 + 模型機率
-                clipped = str(row.get("observation_clipped", "")).lower() == "true"
-                row_status = row.get("signal_status", "")
-
-                y_str = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
-                n_str = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
-                d_str = f"  D${depth:.0f}" if depth and depth > 0 else ""
-                price_line = f"\n  {y_str} / {n_str}{d_str}"
-
-                # 模型方向與機率（p_yes 缺失時顯示「模型—」而非誤判 100%）
-                model_str = _model_prob_str(row)
-
-                if clipped:
-                    line = f"{temp_str}  已鎖定（已超過）"
-                elif row_status == "stale_price" or (yes_ask is None and no_ask is None):
-                    line = f"{temp_str}  {model_str}  無掛單"
-                elif row_status == "market_extreme":
-                    line = f"{temp_str}  {model_str}{price_line}"
-                else:
-                    best_e = max(yes_e, no_e)
-                    warn_tag = " ⚠️最後預報" if row_status == "last_forecast_warning" else ""
-                    if best_e > 0.001:
-                        edge_str = f"YES▲+{best_e*100:.1f}%" if yes_e >= no_e else f"NO▲+{best_e*100:.1f}%"
-                        line = f"{temp_str}  {model_str}  {edge_str}{warn_tag}{price_line}"
-                    else:
-                        line = f"{temp_str}  {model_str}{warn_tag}{price_line}"
-
-                rows_text.append(line)
-
-            body = "\n\n".join(rows_text)
+            body = "\n\n".join(_fmt_contract_block(row) for row in sorted_signals)
 
         text = header + "\n\n" + body
 
@@ -1189,39 +1202,16 @@ class WeatherSignalBot:
             for i, row in enumerate(results, start=offset + 1):
                 city = row.get("city", "?")
                 date = row.get("market_date_local", "?")
-                action = row.get("signal_action", "")
-                if action == "BUY_YES":
-                    side = "YES"
-                    edge = _safe_float(row.get("yes_edge"))
-                    entry_price = _safe_float(row.get("yes_ask_price"))
-                    depth = _safe_float(row.get("yes_sweet_usd"))
-                else:
-                    side = "NO"
-                    edge = _safe_float(row.get("no_edge"))
-                    entry_price = _safe_float(row.get("no_ask_price"))
-                    depth = _safe_float(row.get("no_sweet_usd"))
-                target_price = min(1.0, entry_price * (1 + abs(edge))) if entry_price > 0 else 0.0
                 city_tz = self.reader.get_city_timezone(city)
-                settlement = _fmt_settlement(date, city_tz=city_tz)
-                settlement_tp = _calc_settlement_taipei(date, city_tz)
-                depth_str = f"  ${depth:.0f}" if depth > 0 else ""
-                p_raw = row.get("p_yes") if side == "YES" else row.get("p_no")
-                prob_str = f" ({_safe_float(p_raw)*100:.1f}%)" if p_raw is not None else ""
 
-                # Line 1: 城市 + 日期
-                # Line 2: 結算倒數 + 台北時間
-                countdown_line = f"  {settlement}"
-                if settlement_tp:
-                    countdown_line += f"（台北{settlement_tp}結算）"
-
-                entry = f"\n{i} · <b>{city}</b> · {_fmt_date(date)}\n{countdown_line}"
+                entry = f"\n{i})"
+                entry += f"\n  {city} · {_fmt_date(date)}"
+                entry += f"\n  {_fmt_settlement_full(date, city_tz)}"
 
                 if show_forecast_peak:
-                    # Line 3: 預報最高溫 + 實況最高溫
                     temp_unit = row.get("temp_unit", "C")
+                    # 預報
                     pred_raw = row.get("predicted_daily_high", "")
-                    obs_raw = row.get("observed_high_c", "")
-                    temp_parts = []
                     if pred_raw not in ("", None):
                         try:
                             pred_c = float(pred_raw)
@@ -1229,36 +1219,43 @@ class WeatherSignalBot:
                                 f"{pred_c * 9/5 + 32:.1f}°F" if temp_unit == "F"
                                 else f"{pred_c:.1f}°C"
                             )
-                            temp_parts.append(f"預報：{pred_str}")
+                            entry += f"\n  預報：{pred_str}"
                         except (ValueError, TypeError):
                             pass
-                    if obs_raw not in ("", None):
-                        try:
-                            obs_c = float(obs_raw)
-                            obs_str = (
-                                f"{obs_c * 9/5 + 32:.1f}°F" if temp_unit == "F"
-                                else f"{obs_c:.1f}°C"
-                            )
-                            temp_parts.append(f"實況：{obs_str}")
-                        except (ValueError, TypeError):
-                            pass
-                    if temp_parts:
-                        for part in temp_parts:
-                            entry += f"\n  {part}"
-
-                    # Line 4: 峰值時段
+                    # 實況（優先 latest_obs.json）
+                    _latest = _read_latest_obs().get(city, {})
+                    if _latest.get("status") == "ok" and _latest.get("high_c") is not None:
+                        obs_c = float(_latest["high_c"])
+                        obs_str = (
+                            f"{obs_c * 9/5 + 32:.1f}°F" if temp_unit == "F"
+                            else f"{obs_c:.1f}°C"
+                        )
+                        obs_age = _fmt_obs_age(_latest.get("fetched_at_utc", ""))
+                        entry += f"\n  實況：{obs_str}{obs_age}"
+                    else:
+                        obs_raw = row.get("observed_high_c", "")
+                        if obs_raw not in ("", None):
+                            try:
+                                obs_c = float(obs_raw)
+                                obs_str = (
+                                    f"{obs_c * 9/5 + 32:.1f}°F" if temp_unit == "F"
+                                    else f"{obs_c:.1f}°C"
+                                )
+                                entry += f"\n  實況：{obs_str}"
+                            except (ValueError, TypeError):
+                                pass
+                    # 峰值
                     peak_info = _get_peak_info(city, date, city_tz)
                     if peak_info:
                         entry += f"\n  {peak_info}"
 
-                # 空行分隔溫度/峰值區與交易資訊區
+                # 空行 + 合約區塊（首行縮排 2 格，▶ 行保持 2 格）
                 entry += "\n"
-
-                # Line 3/5: 合約溫度 + 方向 + 機率
-                entry += f"\n  <b>{_fmt_contract_temp(row)}</b>  {side}{prob_str}"
-
-                # Line 4/6: 價格 + edge + 深度
-                entry += f"\n  ${entry_price:.3f}→${target_price:.3f}  {edge:+.1%}{depth_str}"
+                block = _fmt_contract_block(row)
+                first, *rest = block.split("\n", 1)
+                entry += f"\n  {first}"
+                if rest:
+                    entry += f"\n{rest[0]}"
 
                 lines.append(entry)
                 cb = f"rank_jump:{city}:{date}"
@@ -2020,62 +2017,40 @@ class WeatherSignalBot:
     ) -> str:
         """渲染單一城市的結算中頁面。Reader cache 讓 get_city_signals 通常是 hit。"""
         city_tz = self.reader.get_city_timezone(city)
-        settlement_taipei = _calc_settlement_taipei(market_date, city_tz)
         rows = self.reader.get_city_signals(city, market_date)
 
-        # 結算倒數顯示
-        if hours < 1:
-            hrs_display = f"{int(hours * 60)}分鐘"
-        else:
-            hrs_display = f"{int(hours)}小時"
+        # === 標題（拆兩行：結算<6h / 城市·日期）===
+        header = f"結算&lt;6h\n<b>{city}</b> · {_fmt_date(market_date)}\n"
+        header += _fmt_settlement_full(market_date, city_tz) + "\n"
 
-        header = f"結算&lt;6h — <b>{city}</b> · {_fmt_date(market_date)}\n"
-        header += f"結算倒數：{hrs_display}"
-        if settlement_taipei:
-            header += f"（台北 {settlement_taipei} 結算）"
-        header += "\n"
-
-        # 觀測資訊（優先讀 latest_obs.json，fallback ev_signals）
+        # 實況（優先 latest_obs.json，fallback ev_signals）
         _obs_high_c = None
         _obs_unit = "C"
-        _obs_time_str = ""
-        _obs_fetch_age_s = ""
-        for r in rows:
-            _raw = r.get("observed_high_c", "")
-            if _raw not in ("", None):
-                try:
-                    _obs_high_c = float(_raw)
-                    _obs_unit = r.get("temp_unit", "C")
-                    _obs_time_str = _fmt_taipei_from_timestamp(r.get("obs_time", ""))
-                    break
-                except (ValueError, TypeError):
-                    pass
-
-        # 覆蓋：latest_obs.json 有更新時優先使用
+        _obs_age_str = ""
         _sl = _read_latest_obs().get(city, {})
         if _sl.get("status") == "ok" and _sl.get("high_c") is not None:
             _obs_high_c = float(_sl["high_c"])
-            _obs_time_str = _fmt_taipei_from_timestamp(_sl.get("obs_time_utc", ""))
-            _fetched_at_s = _sl.get("fetched_at_utc", "")
-            if _fetched_at_s:
-                try:
-                    _ft_s = datetime.fromisoformat(_fetched_at_s.replace("Z", "+00:00"))
-                    _age_s = int((datetime.now(timezone.utc) - _ft_s).total_seconds() / 60)
-                    _obs_fetch_age_s = f"，{_age_s}分鐘前抓取"
-                except Exception:
-                    pass
+            for r in rows:
+                _obs_unit = r.get("temp_unit", "C")
+                break
+            _obs_age_str = _fmt_obs_age(_sl.get("fetched_at_utc", ""))
+        else:
+            for r in rows:
+                _raw = r.get("observed_high_c", "")
+                if _raw not in ("", None):
+                    try:
+                        _obs_high_c = float(_raw)
+                        _obs_unit = r.get("temp_unit", "C")
+                        break
+                    except (ValueError, TypeError):
+                        pass
 
         if _obs_high_c is not None:
             obs_display = (
                 f"{_obs_high_c * 9 / 5 + 32:.1f}°F" if _obs_unit == "F"
                 else f"{_obs_high_c:.1f}°C"
             )
-            obs_line = f"實況：{obs_display}"
-            if _obs_time_str:
-                obs_line += f"（台北 {_obs_time_str} 觀測{_obs_fetch_age_s}）"
-            elif _obs_fetch_age_s:
-                obs_line += f"（{_obs_fetch_age_s.lstrip('，')}）"
-            header += obs_line + "\n"
+            header += f"實況：{obs_display}{_obs_age_str}\n"
 
         # 峰值時段
         _peak_settling = _get_peak_info(city, market_date, city_tz)
@@ -2086,8 +2061,7 @@ class WeatherSignalBot:
         locked: list[dict] = []
         unlocked: list[dict] = []
         for r in rows:
-            clipped = r.get("observation_clipped", "")
-            if str(clipped).lower() == "true":
+            if str(r.get("observation_clipped", "")).lower() == "true":
                 locked.append(r)
             else:
                 unlocked.append(r)
@@ -2095,45 +2069,25 @@ class WeatherSignalBot:
         locked.sort(key=_city_sort_key)
         unlocked.sort(key=_city_sort_key)
 
-        body = ""
-        if locked:
-            body += "\n已鎖定：\n"
-            for r in locked:
-                temp = _fmt_contract_temp(r)
-                yes_ask = _safe_float(r.get("yes_ask_price"), None)
-                no_ask = _safe_float(r.get("no_ask_price"), None)
-                y = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
-                n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
-                reason = r.get("clip_reason", "")
-                reason_str = f"  {reason}" if reason else ""
-                body += f"  {temp}{reason_str}\n    {y} / {n}\n\n"
+        def _settling_contract_lines(r: dict) -> str:
+            """首行縮排 2 格，▶ 行保持 2 格。"""
+            block = _fmt_contract_block(r)
+            first, *rest = block.split("\n", 1)
+            entry = f"  {first}"
+            if rest:
+                entry += f"\n{rest[0]}"
+            return entry
 
+        body = ""
         if unlocked:
             body += "\n未鎖定：\n"
-            for r in unlocked:
-                temp = _fmt_contract_temp(r)
-                yes_ask = _safe_float(r.get("yes_ask_price"), None)
-                no_ask = _safe_float(r.get("no_ask_price"), None)
-                row_status = r.get("signal_status", "")
-                yes_e = _safe_float(r.get("yes_edge"), 0.0) or 0.0
-                no_e = _safe_float(r.get("no_edge"), 0.0) or 0.0
+            body += "\n\n".join(_settling_contract_lines(r) for r in unlocked)
+            body += "\n"
 
-                model_str = _model_prob_str(r)
-                y = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES —"
-                n = f"NO ${no_ask:.2f}" if no_ask is not None else "NO —"
-
-                if row_status == "stale_price" or (yes_ask is None and no_ask is None):
-                    body += f"  {temp}  {model_str}  無掛單\n"
-                elif row_status == "market_extreme":
-                    body += f"  {temp}  {model_str}\n    {y} / {n}\n"
-                else:
-                    best_e = max(yes_e, no_e)
-                    if best_e > 0.001:
-                        edge_str = f"YES▲+{best_e*100:.1f}%" if yes_e >= no_e else f"NO▲+{best_e*100:.1f}%"
-                        body += f"  {temp}  {model_str}  {edge_str}\n    {y} / {n}\n"
-                    else:
-                        body += f"  {temp}  {model_str}\n    {y} / {n}\n"
-                body += "\n"
+        if locked:
+            body += "\n已鎖定：\n"
+            body += "\n\n".join(_settling_contract_lines(r) for r in locked)
+            body += "\n"
 
         result = header + body
         if len(result) > 4000:
