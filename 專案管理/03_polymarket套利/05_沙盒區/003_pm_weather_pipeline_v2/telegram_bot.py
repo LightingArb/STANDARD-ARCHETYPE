@@ -580,8 +580,7 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
             if before_peak:
                 hours_to_peak = (start_dt - datetime.now(tz)).total_seconds() / 3600
                 h_int = max(0, int(hours_to_peak))
-                countdown_seg = f"（倒數{h_int}小時）" if h_int > 0 else ""
-                status = f"{countdown_seg}⏳峰值前"
+                status = f"（倒數{h_int}小時）" if h_int > 0 else ""
             elif in_peak:
                 status = "🔥峰值中"
             else:
@@ -618,15 +617,21 @@ def _city_sort_key(row: dict):
 
 def _fmt_contract_block(row: dict) -> str:
     """
-    Unified contract display block (no leading indent on first line).
-    Trade lines (▶) have 2-space indent for visual hierarchy.
+    Unified contract display block (no leading indent).
+    Each info on its own line with ▲ prefix.
 
-    已鎖定:   "temp  已鎖定（已超過）"
-    無掛單:   "temp ▲ YES：P% / NO：Q%  無掛單"
-    價格過時: "temp ▲ YES：P% / NO：Q%  價格過時"
-    有價格:   "temp ▲ YES $X / NO $Y ▲ YES：P% / NO：Q%"
-              + "  ▶ 買YES  市場$X→$P（+E%）D$D"  (if yes_edge > 0.01)
-              + "  ▶ 買NO  市場$Y→$Q（+F%）D$D"   (if no_edge > 0.01)
+    已鎖定:   "temp  已鎖定（已超過）"             (1 line)
+    有價格:   temp
+              ▲ YES $X / NO $Y
+              ▲ YES：P% / NO：Q%
+              [▲ 買YES  市場$X→$P（+E%）D$D]      (if yes_edge > 1%)
+              [▲ 買NO   市場$Y→$Q（+F%）D$D]      (if no_edge > 1%)
+    無掛單:   temp
+              ▲ YES：P% / NO：Q%
+              ▲ 無掛單
+    價格過時: temp
+              ▲ YES：P% / NO：Q%
+              ▲ 價格過時
     """
     temp_str = _fmt_contract_temp(row)
     clipped = str(row.get("observation_clipped", "")).lower() == "true"
@@ -652,15 +657,24 @@ def _fmt_contract_block(row: dict) -> str:
     yes_ask = _safe_float(row.get("yes_ask_price"), None)
     no_ask = _safe_float(row.get("no_ask_price"), None)
 
+    lines = [temp_str]
+
+    # 無掛單 / 價格過時（skip price lines）
     if yes_ask is None and no_ask is None:
-        return f"{temp_str} ▲ {prob_str}  無掛單"
+        lines.append(f"▲ {prob_str}")
+        lines.append("▲ 無掛單")
+        return "\n".join(lines)
 
     if row.get("signal_status", "") == "stale_price":
-        return f"{temp_str} ▲ {prob_str}  價格過時"
+        lines.append(f"▲ {prob_str}")
+        lines.append("▲ 價格過時")
+        return "\n".join(lines)
 
-    price_str = f"YES ${yes_ask:.2f} / NO ${no_ask:.2f}"
-    header = f"{temp_str} ▲ {price_str} ▲ {prob_str}"
-    lines = [header]
+    # 有價格
+    y_str = f"YES ${yes_ask:.2f}" if yes_ask is not None else "YES $—"
+    n_str = f"NO ${no_ask:.2f}" if no_ask is not None else "NO $—"
+    lines.append(f"▲ {y_str} / {n_str}")
+    lines.append(f"▲ {prob_str}")
 
     yes_edge = _safe_float(row.get("yes_edge"), 0.0)
     no_edge = _safe_float(row.get("no_edge"), 0.0)
@@ -668,12 +682,12 @@ def _fmt_contract_block(row: dict) -> str:
     if yes_edge > 0.01 and p_yes is not None and yes_ask is not None:
         yes_depth = _safe_float(row.get("yes_sweet_usd"), 0) or _safe_float(row.get("yes_depth_usd"), 0)
         d_str = f"D${yes_depth:.0f}" if yes_depth > 0 else ""
-        lines.append(f"  ▶ 買YES  市場${yes_ask:.2f}→${p_yes:.2f}（+{yes_edge*100:.1f}%）{d_str}".rstrip())
+        lines.append(f"▲ 買YES  市場${yes_ask:.2f}→${p_yes:.2f}（+{yes_edge*100:.1f}%）{d_str}".rstrip())
 
     if no_edge > 0.01 and p_no is not None and no_ask is not None:
         no_depth = _safe_float(row.get("no_sweet_usd"), 0) or _safe_float(row.get("no_depth_usd"), 0)
         d_str = f"D${no_depth:.0f}" if no_depth > 0 else ""
-        lines.append(f"  ▶ 買NO  市場${no_ask:.2f}→${p_no:.2f}（+{no_edge*100:.1f}%）{d_str}".rstrip())
+        lines.append(f"▲ 買NO  市場${no_ask:.2f}→${p_no:.2f}（+{no_edge*100:.1f}%）{d_str}".rstrip())
 
     return "\n".join(lines)
 
@@ -1246,6 +1260,9 @@ class WeatherSignalBot:
             lines.append(empty_msg)
         else:
             for i, row in enumerate(results, start=offset + 1):
+                # 排行/今日/預警頁不顯示已鎖定合約
+                if str(row.get("observation_clipped", "")).lower() == "true":
+                    continue
                 city = row.get("city", "?")
                 date = row.get("market_date_local", "?")
                 city_tz = self.reader.get_city_timezone(city)
@@ -1295,13 +1312,11 @@ class WeatherSignalBot:
                     if peak_info:
                         entry += f"\n  {peak_info}"
 
-                # 空行 + 合約區塊（首行縮排 2 格，▶ 行保持 2 格）
+                # 空行 + 合約區塊（所有行縮排 2 格）
                 entry += "\n"
                 block = _fmt_contract_block(row)
-                first, *rest = block.split("\n", 1)
-                entry += f"\n  {first}"
-                if rest:
-                    entry += f"\n{rest[0]}"
+                for bl in block.split("\n"):
+                    entry += f"\n  {bl}"
 
                 lines.append(entry)
                 lines.append(SEPARATOR)
@@ -2117,13 +2132,9 @@ class WeatherSignalBot:
         unlocked.sort(key=_city_sort_key)
 
         def _settling_contract_lines(r: dict) -> str:
-            """首行縮排 2 格，▶ 行保持 2 格。"""
+            """所有行縮排 2 格。"""
             block = _fmt_contract_block(r)
-            first, *rest = block.split("\n", 1)
-            entry = f"  {first}"
-            if rest:
-                entry += f"\n{rest[0]}"
-            return entry
+            return "\n".join(f"  {line}" for line in block.split("\n"))
 
         body = ""
         if unlocked:
