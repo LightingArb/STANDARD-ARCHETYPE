@@ -44,6 +44,9 @@ try:
 except Exception as _e:
     pass  # 無峰值資料時優雅降級，_get_peak_info() 回空字串
 
+# ── 峰值時段即時資料（05_G_peak_fetch.py 每天更新，每次呼叫讀最新）────────
+_LIVE_PEAK_HOURS_PATH = PROJ_DIR / "data" / "live_peak_hours.json"
+
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     level=logging.INFO,
@@ -233,6 +236,27 @@ class UserManager:
             {"chat_id": cid, "is_admin": cid in admins}
             for cid in sorted(allowed)
         ]
+
+    def get_signal_mode(self, chat_id: str) -> str:
+        """回傳用戶的 signal_mode，預設 'scatter'。"""
+        data = self.load()
+        return (
+            data.get("user_details", {})
+            .get(str(chat_id), {})
+            .get("signal_mode", "scatter")
+        )
+
+    def set_signal_mode(self, chat_id: str, mode: str) -> None:
+        """設定用戶的 signal_mode（scatter / precision / sniper）。"""
+        if mode not in ("scatter", "precision", "sniper"):
+            return
+        data = self.load()
+        details = data.setdefault("user_details", {})
+        if str(chat_id) not in details:
+            details[str(chat_id)] = {}
+        details[str(chat_id)]["signal_mode"] = mode
+        data["updated_at_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.save(data)
 
 
 # ConversationHandler state constants
@@ -525,30 +549,70 @@ _MONTH_TO_SEASON = {
 }
 
 
+def _load_live_peak_for_date(city: str, market_date_str: str) -> tuple[int, int] | None:
+    """
+    回傳 (peak_start, peak_end) local hour。
+
+    Priority 1: GFS 動態峰值（data/gfs_peak_hours.json，每次 05 後更新）
+    Priority 2: Google Weather API 靜態備份（data/live_peak_hours.json，已凍結）
+    找不到一律回傳 None → fallback 到靜態季節資料。
+    """
+    # Priority 1: GFS 動態峰值
+    try:
+        _gfs_path = PROJ_DIR / "data" / "gfs_peak_hours.json"
+        if _gfs_path.exists():
+            _gfs_data = json.loads(_gfs_path.read_text(encoding="utf-8"))
+            _gfs_peak = _gfs_data.get("cities", {}).get(city, {}).get(market_date_str)
+            if _gfs_peak:
+                return int(_gfs_peak["peak_start"]), int(_gfs_peak["peak_end"])
+    except Exception:
+        pass
+
+    # Priority 2: Google Weather 靜態備份（已凍結，不再主動更新）
+    try:
+        if not _LIVE_PEAK_HOURS_PATH.exists():
+            return None
+        data = json.loads(_LIVE_PEAK_HOURS_PATH.read_text(encoding="utf-8"))
+        city_live = data.get("cities", {}).get(city, {})
+        dates = city_live.get("dates", {})
+        peak = dates.get(market_date_str)
+        if not peak:
+            return None
+        return int(peak["peak_start"]), int(peak["peak_end"])
+    except Exception:
+        return None
+
+
 def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
-    """回傳峰值時段字串（schema_version=2，按季節）。無資料或解析失敗回傳空字串。
+    """回傳峰值時段字串。優先使用 live_peak_hours.json，fallback 季節靜態資料。
 
     當天：「峰值：MM/DD HH:MM-HH:MM ⏳/🔥/✅」
     其他日：「峰值：MM/DD HH:MM-HH:MM」
     """
-    city_data = _peak_hours.get(city, {})
-    if not city_data or not isinstance(city_data, dict):
-        return ""
-    seasons = city_data.get("seasons", {})
-    if not seasons:
-        return ""
-    try:
-        month = int(market_date_str[5:7])
-    except Exception:
-        return ""
-    season = _MONTH_TO_SEASON.get(month)
-    if not season:
-        return ""
-    peak = seasons.get(season)
-    if not peak:
-        return ""
-    start_local = int(peak["start"])
-    end_local = int(peak["end"])
+    # 嘗試 live 資料（05_G_peak_fetch.py 每天更新）
+    live = _load_live_peak_for_date(city, market_date_str)
+    if live is not None:
+        start_local, end_local = live
+    else:
+        # Fallback：靜態季節資料
+        city_data = _peak_hours.get(city, {})
+        if not city_data or not isinstance(city_data, dict):
+            return ""
+        seasons = city_data.get("seasons", {})
+        if not seasons:
+            return ""
+        try:
+            month = int(market_date_str[5:7])
+        except Exception:
+            return ""
+        season = _MONTH_TO_SEASON.get(month)
+        if not season:
+            return ""
+        peak = seasons.get(season)
+        if not peak:
+            return ""
+        start_local = int(peak["start"])
+        end_local = int(peak["end"])
     try:
         import zoneinfo as _zi
         from datetime import date as _date
@@ -565,29 +629,27 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
         else:
             end_taipei = end_tp.strftime("%m/%d %H:%M")
         date_prefix = start_tp.strftime("%m/%d")  # 從台北轉換後的 datetime 取日期
-        now_local = datetime.now(tz)
-        if md == now_local.date():
-            current_hour = now_local.hour
-            # P2-2：峰值窗口跨午夜處理（實務上天氣峰值多在下午，但仍應穩健）
-            if start_local <= end_local:
-                # 正常窗口（例如 13-17）
-                before_peak = current_hour < start_local
-                in_peak = start_local <= current_hour <= end_local
+        now_utc = datetime.now(timezone.utc)
+        start_dt_utc = start_dt.astimezone(timezone.utc)
+        end_dt_utc = end_dt.astimezone(timezone.utc)
+        if now_utc < start_dt_utc:
+            diff_secs = (start_dt_utc - now_utc).total_seconds()
+            total_hours = int(diff_secs / 3600)
+            days = total_hours // 24
+            hours_rem = total_hours % 24
+            if days > 0:
+                countdown = f"{days}天{hours_rem}小時"
+            elif total_hours > 0:
+                countdown = f"{total_hours}小時"
             else:
-                # 跨午夜窗口（例如 22-02）
-                before_peak = end_local < current_hour < start_local
-                in_peak = current_hour >= start_local or current_hour <= end_local
-            if before_peak:
-                hours_to_peak = (start_dt - datetime.now(tz)).total_seconds() / 3600
-                h_int = max(0, int(hours_to_peak))
-                status = f"（倒數{h_int}小時）" if h_int > 0 else ""
-            elif in_peak:
-                status = "🔥峰值中"
-            else:
-                status = "✅已過峰值"
-            return f"峰值：{date_prefix} {start_taipei}-{end_taipei} {status}"
+                minutes = max(1, int(diff_secs / 60))
+                countdown = f"{minutes}分鐘"
+            status = f"（倒數{countdown}）"
+        elif now_utc <= end_dt_utc:
+            status = "（🔥峰值進行中）"
         else:
-            return f"峰值：{date_prefix} {start_taipei}-{end_taipei}"
+            status = "（✅峰值已過）"
+        return f"峰值：{date_prefix} {start_taipei}-{end_taipei}{status}"
     except Exception:
         return ""
 
@@ -1188,10 +1250,12 @@ class WeatherSignalBot:
         offset: int = 0,
     ) -> None:
         # Reader 內部 mtime cache（v7.3.9）讓重複按按鈕直接從記憶體回
+        mode = self.user_mgr.get_signal_mode(str(update.effective_chat.id))
         results, total = self.reader.get_all_signals_ranked(
-            sort_by=sort_by, limit=self.page_size, offset=offset
+            sort_by=sort_by, limit=self.page_size, offset=offset, mode=mode
         )
-        sort_label = {"edge": "價差排名", "depth": "深度排名"}.get(sort_by, sort_by)
+        mode_tag = {"scatter": "散彈", "precision": "精準", "sniper": "點射"}.get(mode, mode)
+        sort_label = {"edge": f"價差排名（{mode_tag}）", "depth": f"深度排名（{mode_tag}）"}.get(sort_by, sort_by)
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
             title=sort_label,
@@ -1205,10 +1269,15 @@ class WeatherSignalBot:
         sort_by: str = "edge",
         offset: int = 0,
     ) -> None:
+        mode = self.user_mgr.get_signal_mode(str(update.effective_chat.id))
         results, total = self.reader.get_today_signals_ranked(
-            sort_by=sort_by, limit=self.page_size, offset=offset
+            sort_by=sort_by, limit=self.page_size, offset=offset, mode=mode
         )
-        sort_label = {"edge": "📋 今日信號（8-24小時）", "depth": "📋 今日信號（8-24小時·深度）"}.get(sort_by, "📋 今日信號（8-24小時）")
+        mode_tag = {"scatter": "散彈", "precision": "精準", "sniper": "點射"}.get(mode, mode)
+        sort_label = {
+            "edge": f"📋 今日信號（8-24h·{mode_tag}）",
+            "depth": f"📋 今日信號（8-24h·深度·{mode_tag}）",
+        }.get(sort_by, f"📋 今日信號（{mode_tag}）")
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
             title=sort_label,
@@ -1223,10 +1292,15 @@ class WeatherSignalBot:
         sort_by: str = "edge",
         offset: int = 0,
     ) -> None:
+        mode = self.user_mgr.get_signal_mode(str(update.effective_chat.id))
         results, total = self.reader.get_warning_signals_ranked(
-            sort_by=sort_by, limit=self.page_size, offset=offset
+            sort_by=sort_by, limit=self.page_size, offset=offset, mode=mode
         )
-        sort_label = {"edge": "⚠️ 預警（6-8小時）", "depth": "⚠️ 預警（6-8小時·深度）"}.get(sort_by, "⚠️ 預警（6-8小時）")
+        mode_tag = {"scatter": "散彈", "precision": "精準", "sniper": "點射"}.get(mode, mode)
+        sort_label = {
+            "edge": f"⚠️ 預警（6-8h·{mode_tag}）",
+            "depth": f"⚠️ 預警（6-8h·深度·{mode_tag}）",
+        }.get(sort_by, f"⚠️ 預警（{mode_tag}）")
         await self._render_ranked_page(
             update, results, total, sort_by, offset,
             title=sort_label,
@@ -1530,7 +1604,7 @@ class WeatherSignalBot:
         keyboard = [_back_btn()]
         await self._reply(update, text, keyboard)
 
-    # ── 設定（只讀）──────────────────────────────────────────
+    # ── 設定（含信號模式切換）────────────────────────────────
 
     async def cb_settings(
         self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
@@ -1549,8 +1623,134 @@ class WeatherSignalBot:
             if key in params:
                 lines.append(f"  {key}: {params[key]}")
         lines.append("\n<i>修改請編輯 config/trading_params.yaml</i>")
-        keyboard = [_back_btn()]
+
+        # 信號模式（per-user）
+        chat_id = str(update.effective_chat.id)
+        mode = self.user_mgr.get_signal_mode(chat_id)
+        mode_display = {"scatter": "散彈", "precision": "精準", "sniper": "點射"}.get(mode, mode)
+        lines.append(f"\n<b>信號模式：{mode_display}</b>（點選切換）")
+
+        keyboard = [
+            [
+                InlineKeyboardButton("散彈", callback_data="signal_mode:scatter"),
+                InlineKeyboardButton("精準", callback_data="signal_mode:precision"),
+                InlineKeyboardButton("點射", callback_data="signal_mode:sniper"),
+                InlineKeyboardButton("說明", callback_data="signal_mode_help"),
+            ],
+            _back_btn(),
+        ]
         await self._reply(update, "\n".join(lines), keyboard)
+
+    async def cb_signal_mode(
+        self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
+    ) -> None:
+        """切換 per-user 信號模式（scatter / precision / sniper）。"""
+        if not await self._check_access(update):
+            return
+        data = update.callback_query.data  # "signal_mode:{mode}"
+        mode = data.split(":", 1)[1] if ":" in data else "scatter"
+        chat_id = str(update.effective_chat.id)
+        self.user_mgr.set_signal_mode(chat_id, mode)
+        names = {"scatter": "散彈", "precision": "精準", "sniper": "點射"}
+        await update.callback_query.answer(f"✅ 已切換到{names.get(mode, mode)}模式")
+        await self.cb_admin_panel(update, context)
+
+    async def cb_signal_mode_help(
+        self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
+    ) -> None:
+        """信號模式說明頁。"""
+        if not await self._check_access(update):
+            return
+        text = (
+            "📊 <b>三種信號模式</b>\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "🎯 <b>散彈</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "把所有看起來能賺的機會全部列出來，不管方向。\n\n"
+            "想像你在夜市，有 10 個攤位在猜溫度。\n"
+            "散彈會跟你說：「第 2 攤、第 5 攤、第 8 攤，\n"
+            "這三攤老闆都定價定錯了，你去買都能賺。」\n\n"
+            "<b>例子 1：紐約預測 78°F</b>\n"
+            "• 80-81°F 合約：老闆覺得 15% 會到，你算出只有 5%\n"
+            "  → 買 NO（賭不會到 80 度）✅ 出信號\n"
+            "• 78-79°F 合約：老闆覺得 30%，你算出 40%\n"
+            "  → 買 YES（賭會到 78 度）✅ 出信號\n"
+            "• 76-77°F 合約：老闆覺得 12%，你算出 8%\n"
+            "  → 買 NO（賭不會落在 76-77）✅ 出信號\n\n"
+            "三個全部都出信號。有的賭「會到」，有的賭「不會到」。\n\n"
+            "<b>例子 2：倫敦預測 15°C</b>\n"
+            "• 散彈一口氣列出 5 個信號\n"
+            "• 其中 3 個是買 NO，2 個是買 YES\n"
+            "• 你自己挑要跟哪幾個\n\n"
+            "<i>適合：想自己選，不怕看到多一點選項的人\n"
+            "信號量：最多</i>\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "⚖️ <b>精準（推薦新手）</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "跟散彈一樣列出機會，但多一個保險：\n\n"
+            "模型會先看大方向。如果模型說\n"
+            "「今天溫度 90% 會落在 77-81°F 之間」，\n"
+            "那就代表溫度大概率偏高。\n\n"
+            "這時候如果散彈推了一個「80-81°F 買 NO」\n"
+            "（= 賭溫度不會到 80-81），\n"
+            "精準會擋住它，因為邏輯矛盾了：\n"
+            "模型說溫度偏高，你卻賭溫度不會高。\n\n"
+            "用之前的例子：\n"
+            "• 模型說溫度 90% 落在 77-81°F\n"
+            "• 78-79°F 買 YES → 溫度偏高，買會到 → 合理 ✅ 保留\n"
+            "• 76-77°F 買 NO → 賭溫度不會低到 76 → 合理 ✅ 保留\n"
+            "• 80-81°F 買 NO → 賭溫度不會高到 80？\n"
+            "  但模型說可能到 81 耶 → ⚠️ 有矛盾 → 擋掉\n\n"
+            "結果：散彈的 3 個信號，精準只留 2 個。\n"
+            "被擋掉的那個不一定會虧，但方向不太確定，\n"
+            "精準幫你避開這種「可能對但也可能錯」的單。\n\n"
+            "<i>感受：跟散彈差不多，但少了幾個讓你猶豫的信號\n"
+            "適合：大部分人\n"
+            "信號量：中等</i>\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "🔫 <b>點射</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "只有模型「幾乎確定」的時候才出信號。\n\n"
+            "還是同一個例子：\n"
+            "• 模型說溫度 90% 落在 77-81°F\n"
+            "• 「高於 82°F」的合約 → 模型說幾乎不可能到 82\n"
+            "  → 買 NO 非常確定 ✅ 出信號\n"
+            "• 「低於 76°F」的合約 → 模型說幾乎不可能低到 76\n"
+            "  → 買 NO 非常確定 ✅ 出信號\n"
+            "• 78-79°F 的合約 → 可能會也可能不會\n"
+            "  → 不夠確定 ❌ 不出信號\n\n"
+            "另一個例子：東京預測 25°C\n"
+            "• 模型說 90% 落在 24-27°C\n"
+            "• 「高於 28°C」→ 模型說不太可能 → 買 NO ✅\n"
+            "• 「25-26°C」→ 有可能但不確定 → 不出信號 ❌\n"
+            "• 「低於 23°C」→ 模型說不太可能 → 買 NO ✅\n\n"
+            "<i>感受：手機很安靜，一天可能只響 1-2 次\n"
+            "但響的時候通常方向很準\n"
+            "適合：只想要最穩的，不想被打擾的人\n"
+            "信號量：最少</i>\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💡 <b>怎麼選？</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "不知道選什麼 → 精準（最平衡）\n"
+            "想看多一點機會 → 散彈\n"
+            "只要最穩的 → 點射\n\n"
+            "<i>隨時在「管理」裡切換，立刻生效。\n"
+            "每個人各自設定，互不影響。</i>"
+        )
+        chat_id = str(update.effective_chat.id)
+        mode = self.user_mgr.get_signal_mode(chat_id)
+        keyboard = [
+            [
+                InlineKeyboardButton("散彈", callback_data="signal_mode:scatter"),
+                InlineKeyboardButton("精準", callback_data="signal_mode:precision"),
+                InlineKeyboardButton("點射", callback_data="signal_mode:sniper"),
+            ],
+            [InlineKeyboardButton("返回", callback_data="admin_panel")],
+        ]
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
+        )
 
     # ── 城市管理（admin only）────────────────────────────────
 
@@ -2160,8 +2360,24 @@ class WeatherSignalBot:
         if not await self._check_access(update):
             return
         is_admin = self._is_admin(update.effective_chat.id)
+        chat_id = str(update.effective_chat.id)
+        mode = self.user_mgr.get_signal_mode(chat_id)
+        mode_display = {"scatter": "散彈", "precision": "精準", "sniper": "點射"}.get(mode, mode)
+
+        def _mode_label(label: str, key: str) -> str:
+            return f"{label} ✓" if mode == key else label
+
+        # 模式切換區（所有授權用戶）
+        keyboard = [
+            [
+                InlineKeyboardButton(_mode_label("散彈", "scatter"), callback_data="signal_mode:scatter"),
+                InlineKeyboardButton(_mode_label("精準", "precision"), callback_data="signal_mode:precision"),
+                InlineKeyboardButton(_mode_label("點射", "sniper"), callback_data="signal_mode:sniper"),
+                InlineKeyboardButton("說明", callback_data="signal_mode_help"),
+            ],
+        ]
         if is_admin:
-            keyboard = [
+            keyboard += [
                 [InlineKeyboardButton("顯示我的 ID", callback_data="admin_my_id")],
                 [
                     InlineKeyboardButton("新增用戶", callback_data="admin_add"),
@@ -2170,12 +2386,14 @@ class WeatherSignalBot:
                 [InlineKeyboardButton("所有用戶", callback_data="admin_list")],
                 [InlineKeyboardButton("系統狀態", callback_data="admin_status")],
             ]
-            await self._reply(update, "管理員面板", keyboard)
+            title = "管理員面板"
         else:
-            keyboard = [
+            keyboard += [
                 [InlineKeyboardButton("顯示我的 ID", callback_data="admin_my_id")],
             ]
-            await self._reply(update, "管理面板", keyboard)
+            title = "管理面板"
+        text = f"信號模式：{mode_display} ✓\n─────────────\n{title}"
+        await self._reply(update, text, keyboard)
 
     async def cb_admin_my_id(
         self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
@@ -2623,7 +2841,7 @@ def main() -> None:
     app.add_handler(admin_add_conv)
     app.add_handler(admin_del_conv)
     app.add_handler(CommandHandler("start", bot.cmd_start))
-    # Reply keyboard text handlers（6 個按鈕，2 排）
+    # Reply keyboard text handlers（10 個按鈕，3 排）
     app.add_handler(MessageHandler(filters.Regex("^排行$"), bot.cmd_ranking_msg))
     app.add_handler(MessageHandler(filters.Regex("^今日$"), bot.cmd_today_msg))
     app.add_handler(MessageHandler(filters.Regex("^預警6-8h$"), bot.cmd_warning_msg))
@@ -2647,6 +2865,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(bot.cb_positions, pattern="^positions$"))
     app.add_handler(CallbackQueryHandler(bot.cb_alert_history, pattern="^history$"))
     app.add_handler(CallbackQueryHandler(bot.cb_settings, pattern="^settings$"))
+    app.add_handler(CallbackQueryHandler(bot.cb_signal_mode, pattern="^signal_mode:"))
+    app.add_handler(CallbackQueryHandler(bot.cb_signal_mode_help, pattern="^signal_mode_help$"))
     app.add_handler(CallbackQueryHandler(bot.cb_city_management, pattern="^city_mgmt$"))
     app.add_handler(CallbackQueryHandler(bot.cb_scan_cities, pattern="^scan_cities$"))
     # Admin panel callbacks

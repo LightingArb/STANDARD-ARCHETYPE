@@ -21,7 +21,6 @@
 
 import argparse
 import csv
-import json
 import logging
 import os
 import sys
@@ -30,6 +29,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PROJ_DIR = Path(__file__).resolve().parent
+
+from _lib.ecdf_query import (  # noqa: E402
+    _percentile_from_sorted,
+    _interpolate_sorted_errors,
+    _c_to_f,
+    _f_to_c,
+    compute_p_yes,
+    load_empirical_model,
+    get_bucket,
+    get_bucket_interpolated,
+    safe_float,
+    precision_half_width,
+)
 
 # 本次 run() 共用的時間戳；run() 開頭會覆寫（供 11 檢測上游是否有更新）
 _RUN_GENERATED_UTC: str = ""
@@ -64,81 +76,19 @@ OUTPUT_FIELDS = [
     "p_no",
     "sum_p_all_bins",
     "generated_utc",          # 本次執行的 UTC 時間戳（供 11 檢測上游更新）
+    # Phase 1-C：預報收斂插值（C-P1）
+    "error_q05",              # signed error 5th percentile（lock_range 用）
+    "error_q95",              # signed error 95th percentile（lock_range 用）
+    "bucket_interpolated",    # true/false
+    "interp_from",            # 插值來源 bucket
+    "interp_to",              # 插值目標 bucket
+    "interp_weight",          # 插值權重 0-1
+    "interp_level",           # "lead_hours" / "lead_day" / ""
 ]
-
-# ============================================================
-# ECDF 機率計算
-# ============================================================
-
-def _c_to_f(c: float) -> float:
-    return c * 9.0 / 5.0 + 32.0
-
-def _f_to_c(f: float) -> float:
-    return (f - 32.0) * 5.0 / 9.0
-
-
-def compute_p_yes(
-    sorted_errors: list[float],
-    predicted_high: float,
-    contract_type: str,
-    threshold: float | None = None,
-    range_low: float | None = None,
-    range_high: float | None = None,
-    precision_half: float = 0.5,
-) -> float:
-    """
-    Compute P(YES) using ECDF (direct count of sorted_errors).
-
-    For each contract_type:
-      exact:   P(actual rounds to threshold) → P(error in [threshold ± precision_half - predicted])
-      range:   P(actual in [range_low, range_high]) → P(error in [lo - pred, hi - pred])
-      higher:  P(actual > threshold) → P(error > threshold - predicted)
-      below:   P(actual < threshold) → P(error < threshold - predicted)
-    """
-    n = len(sorted_errors)
-    if n == 0:
-        return 0.0
-
-    if contract_type == "exact" and threshold is not None:
-        lo = threshold - precision_half - predicted_high
-        hi = threshold + precision_half - predicted_high
-        count = sum(1 for e in sorted_errors if lo <= e <= hi)
-
-    elif contract_type == "range" and range_low is not None and range_high is not None:
-        # 擴展邊界 ±precision_half，與 exact 保持一致（相鄰 bin 之間不留縫隙）
-        lo = range_low - precision_half - predicted_high
-        hi = range_high + precision_half - predicted_high
-        count = sum(1 for e in sorted_errors if lo <= e <= hi)
-
-    elif contract_type == "higher" and threshold is not None:
-        # 「X° or higher」= actual >= X - precision_half（與相鄰 exact bin 無縫銜接）
-        thresh_err = (threshold - precision_half) - predicted_high
-        count = sum(1 for e in sorted_errors if e >= thresh_err)
-
-    elif contract_type == "below" and threshold is not None:
-        # 「X° or below」= actual < X + precision_half（與相鄰 exact bin 無縫銜接）
-        thresh_err = (threshold + precision_half) - predicted_high
-        count = sum(1 for e in sorted_errors if e < thresh_err)
-
-    else:
-        log.warning(f"Unknown contract_type={contract_type!r} or missing params, returning 0")
-        return 0.0
-
-    return round(count / n, 6)
-
 
 # ============================================================
 # Data loaders
 # ============================================================
-
-def load_empirical_model(city: str) -> dict | None:
-    path = PROJ_DIR / "data" / "models" / "empirical" / city / "empirical_model.json"
-    if not path.exists():
-        log.warning(f"Empirical model not found: {path}")
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
 
 def load_market_master() -> list[dict]:
     path = PROJ_DIR / "data" / "market_master.csv"
@@ -192,62 +142,6 @@ def get_forecast_row(
     return candidates[0]  # Minimum lead_day = most recent forecast
 
 
-def get_bucket(
-    model: dict,
-    lead_day: int,
-    lead_hours: float | None = None,
-) -> tuple[dict | None, str | None]:
-    """
-    Look up error bucket.
-    Priority: lead_hours_{N} (6h granularity) → lead_day_{N} (exact) → nearest lead_day fallback.
-    lead_hours bucket is only used if it exists AND n >= 100 (built by 09 with MIN_HOURS_BUCKET_SAMPLES).
-    """
-    buckets = model.get("buckets", {})
-
-    # 1. Try lead_hours bucket (more granular, only present when enough samples)
-    if lead_hours is not None:
-        bh = (int(lead_hours) // 6) * 6
-        hours_key = f"lead_hours_{bh}"
-        if hours_key in buckets:
-            log.debug(f"Bucket: {hours_key} (lead_hours={lead_hours:.1f}h)")
-            return buckets[hours_key], hours_key
-
-    # 2. Exact lead_day bucket
-    key = f"lead_day_{lead_day}"
-    if key in buckets:
-        return buckets[key], key
-
-    # 3. Nearest available lead_day fallback
-    available = []
-    for k, b in buckets.items():
-        if not k.startswith("lead_day_"):
-            continue
-        ld = b.get("lead_day")
-        if ld is not None:
-            available.append((abs(int(ld) - lead_day), k, b))
-    if not available:
-        return None, None
-    available.sort()
-    _, fallback_key, fallback_bucket = available[0]
-    log.debug(f"Bucket fallback: lead_day_{lead_day} → {fallback_key}")
-    return fallback_bucket, fallback_key
-
-
-def safe_float(val) -> float | None:
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
-
-
-def precision_half_width(precision_str: str) -> float:
-    """Parse precision string to half-bin width in the native unit."""
-    s = str(precision_str).strip().lower()
-    if s.startswith("0.5"):
-        return 0.25
-    return 0.5  # Default: 1° precision → 0.5 half-width
-
-
 # ============================================================
 # Main logic
 # ============================================================
@@ -271,7 +165,22 @@ def run(
     global _RUN_GENERATED_UTC
     _RUN_GENERATED_UTC = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Feature flag：預報收斂插值（Phase 1-C）
+    _params_path = PROJ_DIR / "config" / "trading_params.yaml"
+    _use_interp = False
+    if _params_path.exists():
+        for _line in _params_path.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if _line.startswith("use_convergence_interpolation"):
+                _val = _line.partition(":")[2].split("#")[0].strip().lower()
+                _use_interp = _val == "true"
+                break
+    log.info(f"use_convergence_interpolation={_use_interp}")
+
     cities_filter = {c.strip() for c in cities.split(",") if c.strip()} if cities else set()
+
+    # B1: strict_mode — --cities 指定時啟用；任何假成功路徑都改 return False
+    strict_mode = bool(cities_filter)
 
     # Only empirical is fully implemented for p_t; OU/QR not yet supported
     if model_name not in ("empirical", "all"):
@@ -280,8 +189,15 @@ def run(
 
     master_rows = load_market_master()
     if not master_rows:
+        # B2: strict_mode → 真實失敗，不假裝成功
+        if strict_mode:
+            log.error(
+                f"market_master.csv empty or not found — no markets to process "
+                f"(strict_mode, requested: {sorted(cities_filter)})"
+            )
+            return False
         log.warning("market_master.csv empty or not found — no markets to process")
-        # Still write empty output CSVs per city
+        # Still write empty output CSVs per city（非 strict 向後相容）
         for city in (cities_filter or []):
             _write_output(city, [])
         return True
@@ -295,6 +211,12 @@ def run(
     ]
 
     if not active_markets:
+        # B3: strict_mode → 真實失敗
+        if strict_mode:
+            log.error(
+                f"No active markets after filtering (strict_mode, requested: {sorted(cities_filter)})"
+            )
+            return False
         log.warning("No active markets after filtering")
         return True
 
@@ -304,6 +226,7 @@ def run(
     cities_in_scope: set[str] = {r["city"] for r in active_markets}
 
     all_output_rows: list[dict] = []
+    written_cities: set[str] = set()  # B4: 追蹤實際寫出 CSV 的城市
 
     for city in sorted(cities_in_scope):
         if cities_filter and city not in cities_filter:
@@ -370,12 +293,20 @@ def run(
                 actual_lead_day = int(frow.get("lead_day") or 1)
                 _lead_hours_to_settlement = frow.get("lead_hours_to_settlement", "")
 
-            # ── Get bucket（優先 lead_hours 6h bucket，fallback lead_day）──
+            # ── Get bucket（with optional quantile interpolation）──
             _lead_hours_val = safe_float(_lead_hours_to_settlement) if _lead_hours_to_settlement else None
-            bucket, bucket_key = get_bucket(model, actual_lead_day, lead_hours=_lead_hours_val)
+            if _use_interp:
+                bucket, bucket_key, _is_interp, _interp_meta = get_bucket_interpolated(
+                    model, actual_lead_day, lead_hours=_lead_hours_val
+                )
+            else:
+                bucket, bucket_key = get_bucket(model, actual_lead_day, lead_hours=_lead_hours_val)
+                _is_interp, _interp_meta = False, {}
 
             # Derive bucket level for diagnostics
-            if bucket_key is not None and bucket_key.startswith("lead_hours_"):
+            if _is_interp:
+                _bucket_level = f"interp_{_interp_meta.get('level', '')}"
+            elif bucket_key is not None and bucket_key.startswith("lead_hours_"):
                 _bucket_level = "lead_hours"
             elif bucket_key == f"lead_day_{actual_lead_day}":
                 _bucket_level = "lead_day_exact"
@@ -389,6 +320,10 @@ def run(
             if not sorted_errors:
                 log.warning(f"  Empty sorted_errors for {city} lead_day={actual_lead_day}")
                 continue
+
+            # error percentiles for lock_range（Phase 1-C → Phase 1-B）
+            _error_q05 = round(_percentile_from_sorted(sorted_errors, 0.05), 4)
+            _error_q95 = round(_percentile_from_sorted(sorted_errors, 0.95), 4)
 
             # ── Compute p_yes ──
             p_yes = compute_p_yes(
@@ -424,6 +359,14 @@ def run(
                 "p_no": p_no,
                 "sum_p_all_bins": "",  # Filled in post-processing below
                 "generated_utc": _RUN_GENERATED_UTC,
+                # Phase 1-C
+                "error_q05": _error_q05,
+                "error_q95": _error_q95,
+                "bucket_interpolated": "true" if _is_interp else "false",
+                "interp_from": _interp_meta.get("from", ""),
+                "interp_to": _interp_meta.get("to", ""),
+                "interp_weight": _interp_meta.get("weight", ""),
+                "interp_level": _interp_meta.get("level", ""),
             })
 
         # ── sum_p_all_bins sanity check ──
@@ -445,11 +388,27 @@ def run(
         all_output_rows.extend(city_rows)
         if city_rows:
             _write_output(city, city_rows)
+            written_cities.add(city)  # B4
         else:
-            log.warning(f"  {city}: 0 probability rows — skipping write (preserving existing)")
+            if strict_mode:
+                # B4: strict_mode 下 0 行是錯誤，不保留舊檔
+                log.error(
+                    f"  {city}: 0 probability rows (strict_mode) "
+                    f"— model/forecast data may be missing"
+                )
+            else:
+                log.warning(f"  {city}: 0 probability rows — skipping write (preserving existing)")
 
     total = len(all_output_rows)
     log.info(f"10_event_probability done. Total rows: {total}")
+
+    # B4: strict_mode — 所有 requested 城市都必須有輸出
+    if strict_mode:
+        missing_output = sorted(cities_filter - written_cities)
+        if missing_output:
+            log.error(f"strict_mode: no output written for: {missing_output}")
+            return False
+
     return True
 
 

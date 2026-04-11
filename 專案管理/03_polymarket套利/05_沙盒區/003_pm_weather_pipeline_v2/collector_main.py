@@ -121,6 +121,7 @@ def _load_alert_sender():
 # 各步驟 timeout（秒）：truth/forecast fetch 最久
 STEP_TIMEOUT: dict[str, int] = {
     "05_D_forecast_fetch.py": 1800,
+    "05_G_peak_fetch.py":      300,
     "06_B_truth_fetch.py":    3600,
     "07_daily_high_pipeline.py": 600,
     "09_model_engine.py":        600,
@@ -468,7 +469,7 @@ def _run_obs_fetch(ready_cities: list, seed_cities: dict) -> None:
         new_results[city] = {
             "high_c": obs.get("high_c"),
             "current_temp_c": obs.get("current_temp_c"),  # WU `temperature`，可能為 None
-            "obs_time_utc": obs.get("obs_time_utc"),      # int epoch or None
+            "obs_time_utc": obs.get("obs_time_utc"),      # ISO str or None
             "fetched_at_utc": fetched_at_utc,
             "last_success_utc": fetched_at_utc,
             "source": obs.get("source", "v3_current"),
@@ -517,11 +518,45 @@ def task_backfill(cities: list[str], csm) -> None:
 
 
 def task_update_forecast(city: str, csm) -> bool:
-    """05（forecast）→ 07（pipeline）→ 09（model）→ 10（probability）for one city."""
+    """05（forecast）→ GFS峰值→ 07（pipeline）→ 09（model）→ 10（probability）for one city."""
     log.info(f"  [forecast] {city}")
     ok = run_script("05_D_forecast_fetch.py", args=["--cities", city, "--mode", "live"], label=f"05({city})")
     if not ok:
         return False
+
+    # GFS 峰值更新（warning-only，失敗不阻塞後續步驟）
+    try:
+        import csv as _csv
+        import json as _json
+        from _lib.gfs_peak_hours import update_gfs_peak_hours as _upd_peak
+
+        _seed_path = PROJ_DIR / "config" / "seed_cities.json"
+        _city_tz = "UTC"
+        if _seed_path.exists():
+            _seed = _json.loads(_seed_path.read_text(encoding="utf-8"))
+            _city_tz = _seed.get(city, {}).get("timezone", "UTC")
+
+        _mm_path = PROJ_DIR / "data" / "market_master.csv"
+        _market_dates: list[str] = []
+        if _mm_path.exists():
+            with open(_mm_path, "r", encoding="utf-8", newline="") as _f:
+                for _row in _csv.DictReader(_f):
+                    if (
+                        _row.get("city") == city
+                        and _row.get("market_enabled", "").lower() == "true"
+                        and _row.get("parse_status", "") == "ok"
+                        and _row.get("market_date_local")
+                    ):
+                        _market_dates.append(_row["market_date_local"])
+        _market_dates = sorted(set(_market_dates))
+
+        if _market_dates:
+            _upd_peak(city, _city_tz, _market_dates)
+        else:
+            log.debug(f"  {city}: no active market_dates for GFS peak update")
+    except Exception as _e:
+        log.warning(f"  {city}: GFS peak hours update failed (non-blocking): {_e}")
+
     ok = run_script("07_daily_high_pipeline.py", args=["--cities", city], label=f"07({city})")
     if not ok:
         return False

@@ -37,10 +37,38 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── fill_simulator（optional，STEP 9 深度分析）──────────────────
+# ── _lib path（ecdf_query, fill_simulator 等）──────────────────
 _lib_dir = PROJ_DIR / "_lib"
 if str(_lib_dir) not in sys.path:
     sys.path.insert(0, str(_lib_dir))
+
+# ── Realtime ECDF：module-level lazy cache（跨 run() 呼叫持久）──
+_empirical_cache: dict[str, dict] = {}
+_empirical_mtime: dict[str, float] = {}
+
+
+def _get_empirical_model(city: str) -> dict | None:
+    """
+    Lazy-load empirical_model.json，mtime 有變化時才重讀。
+    Module-level cache 在 signal_main in-process 載入時跨整個進程生命週期持久。
+    """
+    from _lib.ecdf_query import load_empirical_model as _load_em
+    model_path = (
+        PROJ_DIR / "data" / "models" / "empirical" / city / "empirical_model.json"
+    )
+    if not model_path.exists():
+        return None
+    try:
+        current_mtime = model_path.stat().st_mtime
+    except OSError:
+        return None
+    if city in _empirical_cache and current_mtime == _empirical_mtime.get(city, 0):
+        return _empirical_cache[city]
+    model = _load_em(city)
+    if model:
+        _empirical_cache[city] = model
+        _empirical_mtime[city] = current_mtime
+    return model
 try:
     from fill_simulator import simulate_fill as _simulate_fill  # type: ignore[import]
     _HAS_FILL_SIM = True
@@ -124,7 +152,7 @@ OUTPUT_FIELDS = [
     "no_fixed_exhausted",
     # 即時觀測邏輯裁剪欄位
     "observed_high_c",
-    "obs_time",
+    "obs_time_utc",
     "observation_clipped",
     "clip_reason",
     "observation_source",
@@ -135,6 +163,16 @@ OUTPUT_FIELDS = [
     # 版本追蹤（P0-6：偵測 probability/ev_signals 脫鉤）
     "generated_utc",           # 本輪 11 產生此 row 的 UTC 時間
     "upstream_generated_utc",  # 10 產生 probability 的 UTC 時間（從 prow 帶上來）
+    # Phase 1-B：Lock Range + 三模式信號
+    "error_q05",               # 預報誤差 5th percentile（C，來自 10 的插值桶）
+    "error_q95",               # 預報誤差 95th percentile（C，來自 10 的插值桶）
+    "bucket_interpolated",     # 是否用插值桶（True/False，來自 10）
+    "lock_range_low",          # predicted + error_q05（C）
+    "lock_range_high",         # predicted + error_q95（C）
+    "lock_direction",          # YES / NO / NONE（90% 區間是否完全落在一側）
+    "signal_action_scatter",   # 散彈模式 = signal_action（現有邏輯不變）
+    "signal_action_sniper",    # 點射模式：lock_direction 確認方向才動作
+    "signal_action_precision", # 精準模式：有方向鎖定才動作（scatter + 方向過濾）
 ]
 
 STALE_PRICE_THRESHOLD = 300  # 秒，超過此值 price_status = "stale"
@@ -269,40 +307,47 @@ def _calc_remaining_gain_p(
     return (max(0.0, min(1.0, p)), n)
 
 
-def _is_obs_fresh_for_rg(obs_info: dict, params: dict) -> bool:
+def _is_obs_fresh(
+    obs_info: dict,
+    *,
+    fetch_max_minutes: Optional[float] = None,
+    obs_time_max_minutes: Optional[float] = None,
+) -> bool:
     """
-    remaining_gain 用的雙重 freshness 檢查：
-      1. fetched_at_utc（或 fetched_at）距今 <= remaining_gain_obs_max_age_minutes
-      2. obs_time_utc（unix ts）距今 <= remaining_gain_obs_time_max_age_minutes
-    任一失敗 → False。obs_time 缺失不阻塞（部分站不回傳）。
+    統一 freshness 檢查（C-fix-3）。接受 epoch 或 ISO（透過 parse_obs_time_utc）。
+
+    fetch_max_minutes: None → 跳過 fetched_at 檢查。
+    obs_time_max_minutes: None → 跳過 obs_time_utc 檢查。
+    任一啟用的檢查失敗 → False。
     """
+    from _lib.obs_time_utils import parse_obs_time_utc
     now = datetime.now(timezone.utc)
 
-    fetch_max = float(params.get("remaining_gain_obs_max_age_minutes", 20))
-    fetched = obs_info.get("fetched_at_utc") or obs_info.get("fetched_at", "")
-    if not fetched:
-        return False
-    try:
-        ft = datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
-        if (now - ft).total_seconds() > fetch_max * 60:
+    if fetch_max_minutes is not None:
+        fetched = obs_info.get("fetched_at_utc") or obs_info.get("fetched_at", "")
+        ft = parse_obs_time_utc(fetched)
+        if ft is None or (now - ft).total_seconds() > fetch_max_minutes * 60:
             return False
-    except (ValueError, TypeError):
-        return False
 
-    obs_max = float(params.get("remaining_gain_obs_time_max_age_minutes", 30))
-    obs_time = obs_info.get("obs_time_utc") or obs_info.get("obs_time", "")
-    if obs_time:
-        try:
-            if str(obs_time).lstrip("-").isdigit():
-                ot = datetime.fromtimestamp(int(obs_time), tz=timezone.utc)
-            else:
-                ot = datetime.fromisoformat(str(obs_time).replace("Z", "+00:00"))
-            if (now - ot).total_seconds() > obs_max * 60:
+    if obs_time_max_minutes is not None:
+        obs_time = obs_info.get("obs_time_utc") or obs_info.get("obs_time", "")
+        if obs_time:
+            ot = parse_obs_time_utc(obs_time)
+            if ot is not None and (now - ot).total_seconds() > obs_time_max_minutes * 60:
                 return False
-        except (ValueError, TypeError, OSError):
-            pass  # 無法解析 obs_time 不阻塞
 
     return True
+
+
+def _is_obs_fresh_for_rg(obs_info: dict, params: dict) -> bool:
+    """
+    remaining_gain 用的雙重 freshness 檢查。委派給 _is_obs_fresh()。
+    """
+    return _is_obs_fresh(
+        obs_info,
+        fetch_max_minutes=float(params.get("remaining_gain_obs_max_age_minutes", 20)),
+        obs_time_max_minutes=float(params.get("remaining_gain_obs_time_max_age_minutes", 30)),
+    )
 
 
 # ============================================================
@@ -361,16 +406,9 @@ def _apply_observation_clipping(
     if str(obs_info.get("status", "ok")).lower() == "stale":
         log.debug(f"  obs clip skip: {city} status=stale")
         return
-    obs_time_utc = obs_info.get("obs_time_utc")
-    if obs_time_utc is not None:
-        try:
-            obs_epoch = float(obs_time_utc)
-            age_hours = (datetime.now(timezone.utc).timestamp() - obs_epoch) / 3600.0
-            if age_hours > 2.0:
-                log.debug(f"  obs clip skip: {city} obs_time age={age_hours:.1f}h > 2h")
-                return
-        except (TypeError, ValueError):
-            pass  # 無法解析就不做 TTL 檢查，退回原邏輯
+    if not _is_obs_fresh(obs_info, obs_time_max_minutes=120.0):
+        log.debug(f"  obs clip skip: {city} obs_time_utc stale (>2h)")
+        return
 
     observed_high_c = float(obs_info["high_c"])
     obs_source = obs_info.get("source", "unknown")
@@ -511,6 +549,122 @@ def get_signal_action(signal_status: str, raw_signal: str) -> str:
     if signal_status != "active":
         return "SUPPRESSED"
     return raw_signal  # BUY_YES / BUY_NO / NO_TRADE / NO_PRICE
+
+
+# ============================================================
+# Phase 1-B：Lock Range + Direction + Signal Modes
+# ============================================================
+
+def compute_lock_range(
+    predicted_c: float,
+    error_q05: float,
+    error_q95: float,
+) -> tuple[float, float]:
+    """
+    90% 預測區間（攝氏）。
+    lock_range_low  = predicted + error_q05（誤差 5th pct，通常為負）
+    lock_range_high = predicted + error_q95（誤差 95th pct，通常為正）
+    """
+    return round(predicted_c + error_q05, 4), round(predicted_c + error_q95, 4)
+
+
+def compute_lock_direction(
+    market_type: str,
+    threshold: float | None,
+    range_low: float | None,
+    range_high: float | None,
+    precision_half: float,
+    lock_low_c: float,
+    lock_high_c: float,
+    temp_unit: str = "C",
+) -> str:
+    """
+    判斷 90% 預測區間是否完全落在市場的 YES 或 NO 一側。
+    lock_low_c / lock_high_c 為攝氏；若合約單位為 F 則自動轉換後比較。
+    回傳 "YES" / "NO" / "NONE"。
+
+    YES 窗口定義（與 10_event_probability 和 obs clipping 一致）：
+      higher X:  actual >= X - precision_half
+      below  X:  actual <  X + precision_half
+      exact  X:  actual in [X - half, X + half)
+      range L-H: actual in [L - half, H + half)
+    """
+    def _to_market(c: float) -> float:
+        return c * 9.0 / 5.0 + 32.0 if temp_unit == "F" else c
+
+    lo = _to_market(lock_low_c)
+    hi = _to_market(lock_high_c)
+
+    if market_type == "higher":
+        if threshold is None:
+            return "NONE"
+        yes_lo = threshold - precision_half
+        if lo >= yes_lo:
+            return "YES"
+        if hi < yes_lo:
+            return "NO"
+
+    elif market_type == "below":
+        if threshold is None:
+            return "NONE"
+        yes_hi = threshold + precision_half
+        if hi < yes_hi:
+            return "YES"
+        if lo >= yes_hi:
+            return "NO"
+
+    elif market_type == "exact":
+        if threshold is None:
+            return "NONE"
+        yes_lo = threshold - precision_half
+        yes_hi = threshold + precision_half
+        if lo >= yes_hi or hi < yes_lo:
+            return "NO"
+        if lo >= yes_lo and hi < yes_hi:
+            return "YES"
+
+    elif market_type == "range":
+        if range_low is None or range_high is None:
+            return "NONE"
+        yes_lo = range_low - precision_half
+        yes_hi = range_high + precision_half
+        if lo >= yes_hi or hi < yes_lo:
+            return "NO"
+        if lo >= yes_lo and hi < yes_hi:
+            return "YES"
+
+    return "NONE"
+
+
+def _apply_signal_modes(base_signal: str, lock_direction: str) -> tuple[str, str, str]:
+    """
+    三模式信號計算。
+
+    scatter  （散彈）：= base_signal，等同現有邏輯，方向最寬。
+    precision（精準）：有方向鎖定（lock_direction != NONE）才動作，否則 SUPPRESSED。
+    sniper   （點射）：lock_direction 明確確認與下注方向一致才動作；不確認 → NO_TRADE。
+
+    優先序寬→窄：scatter > precision > sniper。
+    """
+    scatter = base_signal
+
+    # precision：需要有方向鎖定
+    if base_signal == "SUPPRESSED" or lock_direction == "NONE":
+        precision = "SUPPRESSED"
+    else:
+        precision = base_signal
+
+    # sniper：lock_direction 必須與下注側吻合
+    if base_signal == "SUPPRESSED":
+        sniper = "SUPPRESSED"
+    elif base_signal == "BUY_YES" and lock_direction == "YES":
+        sniper = "BUY_YES"
+    elif base_signal == "BUY_NO" and lock_direction == "NO":
+        sniper = "BUY_NO"
+    else:
+        sniper = "NO_TRADE"
+
+    return scatter, sniper, precision
 
 
 # ============================================================
@@ -974,24 +1128,130 @@ def run(
             if no_best_bid is not None:
                 out_row["no_best_bid"] = round(no_best_bid, 6)
 
+            # ── Phase 1-B：Lock Range & Direction（不依賴價格，早於 EV 計算）──
+            _pred_c = safe_float(prow.get("predicted_daily_high"))
+            _eq05 = safe_float(prow.get("error_q05"))
+            _eq95 = safe_float(prow.get("error_q95"))
+            out_row["error_q05"] = _eq05 if _eq05 is not None else ""
+            out_row["error_q95"] = _eq95 if _eq95 is not None else ""
+            out_row["bucket_interpolated"] = prow.get("bucket_interpolated", "")
+
+            if _pred_c is not None and _eq05 is not None and _eq95 is not None:
+                _lock_lo, _lock_hi = compute_lock_range(_pred_c, _eq05, _eq95)
+                _lock_dir = compute_lock_direction(
+                    market_type=out_row.get("market_type", ""),
+                    threshold=safe_float(out_row.get("threshold")),
+                    range_low=safe_float(out_row.get("range_low")),
+                    range_high=safe_float(out_row.get("range_high")),
+                    precision_half=safe_float(out_row.get("precision_half")) or 0.5,
+                    lock_low_c=_lock_lo,
+                    lock_high_c=_lock_hi,
+                    temp_unit=out_row.get("temp_unit", "C"),
+                )
+                out_row["lock_range_low"] = _lock_lo
+                out_row["lock_range_high"] = _lock_hi
+                out_row["lock_direction"] = _lock_dir
+                log.debug(
+                    f"  LockRange: {city} predicted={_pred_c:.2f}°C "
+                    f"[{_lock_lo:.2f}, {_lock_hi:.2f}] → {_lock_dir}"
+                )
+            else:
+                out_row["lock_range_low"] = ""
+                out_row["lock_range_high"] = ""
+                out_row["lock_direction"] = "NONE"
+
             # ── 即時觀測邏輯裁剪（在 EV 計算之前）────────────────────────
             out_row["observed_high_c"] = ""
-            out_row["obs_time"] = ""
+            out_row["obs_time_utc"] = ""
             out_row["observation_source"] = ""
             out_row["observation_clipped"] = False
             out_row["clip_reason"] = ""
             _apply_observation_clipping(out_row, _obs, city_timezones)
-            # obs_time：從即時觀測 cache 補入（不在 clipping 函式內，避免修改簽名）
+            # obs_time_utc：從即時觀測 cache 補入（不在 clipping 函式內，避免修改簽名）
             _city_obs = _obs.get(city)
             if _city_obs:
-                out_row["obs_time"] = _city_obs.get("obs_time", "")
+                out_row["obs_time_utc"] = _city_obs.get("obs_time_utc", "")
             # 更新 local p_yes/p_no（裁剪後可能已改變）
             p_yes = out_row["p_yes"]
             p_no = out_row["p_no"]
 
+            # ── Realtime ECDF 即時機率（Phase 1.5）────────────────────────────
+            # use_realtime_probability: true → 每輪重算 ECDF p_yes（不依賴 batch 固定值）
+            # 失敗時 fallback 到 batch_ecdf（prow 的固定值）
+            probability_mode = "batch_ecdf"
+
+            _use_rt = str(params.get("use_realtime_probability", "false")).lower() == "true"
+            if _use_rt:
+                _rt_model = _get_empirical_model(city)
+                if _rt_model is not None:
+                    from _lib.ecdf_query import (
+                        get_bucket_interpolated as _gbi,
+                        compute_p_yes as _cpy,
+                        _f_to_c as _ftc,
+                        _percentile_from_sorted as _pfs,
+                    )
+                    # lead_hours 即時算，lead_day 讀 prow（避免邊界 bug）
+                    _rt_lead_hours = lead_hours_to_settlement
+                    _rt_lead_day = int(safe_float(prow.get("lead_day")) or 1)
+
+                    # predicted_daily_high 永遠是 °C，不轉換
+                    _rt_predicted = safe_float(prow.get("predicted_daily_high"))
+
+                    # 合約門檻只轉 F→C
+                    _rt_temp_unit = prow.get("temp_unit", "C")
+                    _rt_threshold = safe_float(prow.get("threshold"))
+                    _rt_range_low = safe_float(prow.get("range_low"))
+                    _rt_range_high = safe_float(prow.get("range_high"))
+                    _rt_half_w = safe_float(prow.get("precision_half")) or 0.5
+                    if _rt_temp_unit == "F":
+                        if _rt_threshold is not None:
+                            _rt_threshold = _ftc(_rt_threshold)
+                        if _rt_range_low is not None:
+                            _rt_range_low = _ftc(_rt_range_low)
+                        if _rt_range_high is not None:
+                            _rt_range_high = _ftc(_rt_range_high)
+                        _rt_half_w = _rt_half_w * 5.0 / 9.0
+
+                    # 三層插值 bucket 查找
+                    _rt_bucket, _rt_key, _rt_interp, _rt_meta = _gbi(
+                        _rt_model, _rt_lead_day, _rt_lead_hours
+                    )
+                    _rt_sorted_errors = _rt_bucket.get("sorted_errors", []) if _rt_bucket else []
+
+                    if _rt_sorted_errors and _rt_predicted is not None:
+                        _rt_p_yes = _cpy(
+                            _rt_sorted_errors,
+                            _rt_predicted,
+                            prow.get("market_type", ""),
+                            _rt_threshold,
+                            _rt_range_low,
+                            _rt_range_high,
+                            _rt_half_w,
+                        )
+                        _rt_p_no = round(1.0 - _rt_p_yes, 6)
+                        # 同步更新 out_row 及本地變數（RG 仍可覆蓋）
+                        out_row["p_yes"] = _rt_p_yes
+                        out_row["p_no"] = _rt_p_no
+                        p_yes = _rt_p_yes
+                        p_no = _rt_p_no
+                        # 更新 error percentiles（即時 bucket 的插值結果）
+                        out_row["error_q05"] = round(_pfs(_rt_sorted_errors, 0.05), 4)
+                        out_row["error_q95"] = round(_pfs(_rt_sorted_errors, 0.95), 4)
+                        probability_mode = "realtime_ecdf"
+                        log.debug(
+                            f"  RT-ECDF: {city} lead_h={_rt_lead_hours} "
+                            f"ld={_rt_lead_day} p_yes={_rt_p_yes:.4f}"
+                        )
+                    else:
+                        log.debug(
+                            f"  RT-ECDF: {city} no bucket/predicted — fallback batch_ecdf"
+                        )
+                else:
+                    log.debug(f"  RT-ECDF: {city} model not found — fallback batch_ecdf")
+
             # ── Remaining Gain 機率修正（v7.5）────────────────────────────────
             # 條件：enabled + 距結算 <= rg_max_lead + 未被 obs clip + 有 RG 模型 + 有觀測
-            probability_mode = "empirical"
+            # RG 優先序高於 realtime_ecdf（覆蓋）
             rg_hour_used = ""
             rg_sample_count = ""
 
@@ -1063,15 +1323,12 @@ def run(
                                     f"cur={current_max_c:.1f}°C thr={threshold_c} "
                                     f"p_yes={rg_p_yes:.4f} (n={rg_n})"
                                 )
-                            else:
-                                probability_mode = "empirical_fallback"
-                        else:
-                            probability_mode = "empirical_fallback"
+                            # else: probability_mode 保留 realtime_ecdf / batch_ecdf
+                        # else: probability_mode 保留 realtime_ecdf / batch_ecdf
                     except Exception as e:
                         log.warning(f"  RG calc error {city}: {e}")
-                        probability_mode = "empirical_fallback"
-                else:
-                    probability_mode = "empirical_fallback"
+                        # probability_mode 保留 realtime_ecdf / batch_ecdf
+                # else: probability_mode 保留 realtime_ecdf / batch_ecdf
 
             out_row["probability_mode"] = probability_mode
             out_row["remaining_gain_hour_used"] = rg_hour_used
@@ -1193,6 +1450,16 @@ def run(
                     "signal_status": sig_status,
                     "signal_action": "SUPPRESSED",
                 })
+
+            # ── Phase 1-B：三模式信號（scatter / sniper / precision）──────────
+            _base_sig = out_row.get("signal_action", "SUPPRESSED")
+            _lock_dir_sig = out_row.get("lock_direction", "NONE")
+            _sig_scatter, _sig_sniper, _sig_precision = _apply_signal_modes(
+                _base_sig, _lock_dir_sig
+            )
+            out_row["signal_action_scatter"] = _sig_scatter
+            out_row["signal_action_sniper"] = _sig_sniper
+            out_row["signal_action_precision"] = _sig_precision
 
             output_rows.append(out_row)
 
