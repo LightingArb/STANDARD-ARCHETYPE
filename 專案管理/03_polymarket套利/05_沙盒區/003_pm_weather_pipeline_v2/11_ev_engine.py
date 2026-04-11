@@ -128,6 +128,10 @@ OUTPUT_FIELDS = [
     "observation_clipped",
     "clip_reason",
     "observation_source",
+    # Remaining Gain 機率模式（v7.5）
+    "probability_mode",             # empirical / remaining_gain / empirical_fallback
+    "remaining_gain_hour_used",     # 查詢用的 local_hour（診斷用）
+    "remaining_gain_sample_count",  # bucket 樣本數（診斷用）
     # 版本追蹤（P0-6：偵測 probability/ev_signals 脫鉤）
     "generated_utc",           # 本輪 11 產生此 row 的 UTC 時間
     "upstream_generated_utc",  # 10 產生 probability 的 UTC 時間（從 prow 帶上來）
@@ -184,6 +188,121 @@ def _calc_hours_to_settlement(market_date_str: str, city_tz_str: str) -> Optiona
     except Exception as e:
         log.warning(f"_calc_hours_to_settlement({market_date_str}, {city_tz_str}): {e}")
         return None
+
+
+# ============================================================
+# Remaining Gain 模型（v7.5）
+# ============================================================
+
+def _load_remaining_gain_models() -> dict[str, dict]:
+    """讀取所有城市的 remaining_gain model JSON。回傳 {city: model_dict}。"""
+    rg_dir = PROJ_DIR / "data" / "models" / "remaining_gain"
+    models: dict[str, dict] = {}
+    if not rg_dir.exists():
+        return models
+    for city_dir in rg_dir.iterdir():
+        if not city_dir.is_dir():
+            continue
+        model_path = city_dir / "remaining_gain_model.json"
+        if model_path.exists():
+            try:
+                models[city_dir.name] = json.loads(model_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                log.warning(f"_load_remaining_gain_models: {city_dir.name}: {e}")
+    return models
+
+
+def _calc_remaining_gain_p(
+    rg_model: dict,
+    local_hour: int,
+    current_max_c: float,
+    threshold_c: float,
+    event_type: str,
+    precision_half_c: float,
+    range_low_c: float = 0.0,
+    range_high_c: float = 0.0,
+    min_bucket_samples: int = 30,
+) -> Optional[tuple[float, int]]:
+    """
+    用 remaining_gain ECDF 計算 p_yes。
+    回傳 (p_yes, n_samples)；None = 無法計算（bucket 不存在或樣本不夠）。
+
+    所有溫度參數均為攝氏。
+    """
+    bucket = rg_model.get("buckets", {}).get(str(local_hour))
+    if not bucket:
+        return None
+
+    sorted_gains: list[float] = bucket.get("sorted_gains", [])
+    n = len(sorted_gains)
+    if n < min_bucket_samples:
+        return None
+
+    def p_exceed(need_gain: float) -> float:
+        """P(remaining_gain >= need_gain)"""
+        if need_gain <= 0:
+            return 1.0
+        count = sum(1 for g in sorted_gains if g >= need_gain)
+        return count / n
+
+    if event_type == "higher":
+        need = (threshold_c - precision_half_c) - current_max_c
+        p = p_exceed(need)
+
+    elif event_type == "below":
+        need = (threshold_c + precision_half_c) - current_max_c
+        p = 1.0 - p_exceed(need)
+
+    elif event_type == "exact":
+        low_need = (threshold_c - precision_half_c) - current_max_c
+        high_need = (threshold_c + precision_half_c) - current_max_c
+        p = p_exceed(low_need) - p_exceed(high_need)
+
+    elif event_type == "range":
+        low_need = (range_low_c - precision_half_c) - current_max_c
+        high_need = (range_high_c + precision_half_c) - current_max_c
+        p = p_exceed(low_need) - p_exceed(high_need)
+
+    else:
+        return None
+
+    return (max(0.0, min(1.0, p)), n)
+
+
+def _is_obs_fresh_for_rg(obs_info: dict, params: dict) -> bool:
+    """
+    remaining_gain 用的雙重 freshness 檢查：
+      1. fetched_at_utc（或 fetched_at）距今 <= remaining_gain_obs_max_age_minutes
+      2. obs_time_utc（unix ts）距今 <= remaining_gain_obs_time_max_age_minutes
+    任一失敗 → False。obs_time 缺失不阻塞（部分站不回傳）。
+    """
+    now = datetime.now(timezone.utc)
+
+    fetch_max = float(params.get("remaining_gain_obs_max_age_minutes", 20))
+    fetched = obs_info.get("fetched_at_utc") or obs_info.get("fetched_at", "")
+    if not fetched:
+        return False
+    try:
+        ft = datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
+        if (now - ft).total_seconds() > fetch_max * 60:
+            return False
+    except (ValueError, TypeError):
+        return False
+
+    obs_max = float(params.get("remaining_gain_obs_time_max_age_minutes", 30))
+    obs_time = obs_info.get("obs_time_utc") or obs_info.get("obs_time", "")
+    if obs_time:
+        try:
+            if str(obs_time).lstrip("-").isdigit():
+                ot = datetime.fromtimestamp(int(obs_time), tz=timezone.utc)
+            else:
+                ot = datetime.fromisoformat(str(obs_time).replace("Z", "+00:00"))
+            if (now - ot).total_seconds() > obs_max * 60:
+                return False
+        except (ValueError, TypeError, OSError):
+            pass  # 無法解析 obs_time 不阻塞
+
+    return True
 
 
 # ============================================================
@@ -666,6 +785,15 @@ def run(
     log.info(f"Safety gates: suppress_hours={signal_suppress_hours}, warning_hours={signal_warning_hours}, extreme_price_threshold={signal_extreme_price_threshold}")
     log.info(f"Fee basis: {fee_mode} / {fee_basis}")
 
+    # Remaining Gain 參數
+    rg_enabled = str(params.get("remaining_gain_enabled", "false")).lower() == "true"
+    rg_max_lead = float(params.get("remaining_gain_max_lead_hours", 6))
+    rg_min_hour = int(float(params.get("remaining_gain_min_local_hour", 7)))
+    rg_min_bucket_samples = int(float(params.get("remaining_gain_min_bucket_samples", 30)))
+    rg_models = _load_remaining_gain_models() if rg_enabled else {}
+    if rg_enabled:
+        log.info(f"Remaining gain enabled: max_lead={rg_max_lead}h, min_local_hour={rg_min_hour}, models_loaded={len(rg_models)}")
+
     # book_state dir（STEP 6）
     book_state_dir = PROJ_DIR / "data" / "raw" / "prices" / "book_state"
     has_book_state = book_state_dir.exists()
@@ -861,6 +989,94 @@ def run(
             p_yes = out_row["p_yes"]
             p_no = out_row["p_no"]
 
+            # ── Remaining Gain 機率修正（v7.5）────────────────────────────────
+            # 條件：enabled + 距結算 <= rg_max_lead + 未被 obs clip + 有 RG 模型 + 有觀測
+            probability_mode = "empirical"
+            rg_hour_used = ""
+            rg_sample_count = ""
+
+            if (rg_enabled
+                    and lead_hours_to_settlement is not None
+                    and lead_hours_to_settlement <= rg_max_lead
+                    and not out_row.get("observation_clipped", False)
+                    and city in rg_models
+                    and _obs.get(city) is not None):
+
+                _city_obs_rg = _obs[city]
+                _city_tz_str = city_timezones.get(city, "")
+                local_hour = -1
+                if _city_tz_str:
+                    try:
+                        import zoneinfo as _zi
+                        local_hour = datetime.now(_zi.ZoneInfo(_city_tz_str)).hour
+                    except Exception:
+                        pass
+
+                if local_hour >= rg_min_hour and _is_obs_fresh_for_rg(_city_obs_rg, params):
+                    try:
+                        current_max_c = float(_city_obs_rg.get("high_c", 0) or 0)
+                        temp_unit = out_row.get("temp_unit", "C")
+
+                        def _to_c(val):
+                            """合約門檻轉攝氏（原本是 F 時）"""
+                            v = safe_float(val)
+                            if v is None:
+                                return None
+                            return (v - 32.0) * 5.0 / 9.0 if temp_unit == "F" else v
+
+                        def _half_to_c(val):
+                            """precision_half 轉攝氏（1°F = 5/9°C）"""
+                            v = safe_float(val)
+                            if v is None:
+                                return 0.5
+                            return v * 5.0 / 9.0 if temp_unit == "F" else v
+
+                        market_type = out_row.get("market_type", "")
+                        threshold_c = _to_c(out_row.get("threshold"))
+                        half_c = _half_to_c(out_row.get("precision_half"))
+                        range_low_c = _to_c(out_row.get("range_low")) or 0.0
+                        range_high_c = _to_c(out_row.get("range_high")) or 0.0
+
+                        if threshold_c is not None or market_type == "range":
+                            rg_result = _calc_remaining_gain_p(
+                                rg_models[city],
+                                local_hour,
+                                current_max_c,
+                                threshold_c or 0.0,
+                                market_type,
+                                half_c,
+                                range_low_c,
+                                range_high_c,
+                                rg_min_bucket_samples,
+                            )
+                            if rg_result is not None:
+                                rg_p_yes, rg_n = rg_result
+                                out_row["p_yes"] = round(rg_p_yes, 6)
+                                out_row["p_no"] = round(1.0 - rg_p_yes, 6)
+                                p_yes = out_row["p_yes"]
+                                p_no = out_row["p_no"]
+                                probability_mode = "remaining_gain"
+                                rg_hour_used = local_hour
+                                rg_sample_count = rg_n
+                                log.debug(
+                                    f"  RG: {city} h={local_hour} "
+                                    f"cur={current_max_c:.1f}°C thr={threshold_c} "
+                                    f"p_yes={rg_p_yes:.4f} (n={rg_n})"
+                                )
+                            else:
+                                probability_mode = "empirical_fallback"
+                        else:
+                            probability_mode = "empirical_fallback"
+                    except Exception as e:
+                        log.warning(f"  RG calc error {city}: {e}")
+                        probability_mode = "empirical_fallback"
+                else:
+                    probability_mode = "empirical_fallback"
+
+            out_row["probability_mode"] = probability_mode
+            out_row["remaining_gain_hour_used"] = rg_hour_used
+            out_row["remaining_gain_sample_count"] = rg_sample_count
+
             # ── fair_exit：扣出場 fee 後的理論出場價（供交易模組 Trailing TP 用）──
             # 同時同步 naive_fair 為裁剪後的值（原本建構時是裁剪前的 p_yes/p_no）
             out_row["naive_fair_yes"] = p_yes
@@ -896,9 +1112,13 @@ def run(
                 # ── 安全閘門 1：距結算時間過短 ─────────────────────────────
                 if sig_action != "SUPPRESSED" and lead_hours_to_settlement is not None:
                     if lead_hours_to_settlement < signal_suppress_hours:
-                        # < 6h：完全壓制
-                        sig_status = "too_close_to_settlement"
-                        sig_action = "SUPPRESSED"
+                        if probability_mode == "remaining_gain":
+                            # remaining_gain 模式：不 suppress，這個窗口正是 RG 設計的目標
+                            pass
+                        else:
+                            # < 6h：完全壓制
+                            sig_status = "too_close_to_settlement"
+                            sig_action = "SUPPRESSED"
                     elif lead_hours_to_settlement < signal_warning_hours:
                         # 6-8h：顯示但標記最後預報警告（sig_action 保持正常）
                         sig_status = "last_forecast_warning"

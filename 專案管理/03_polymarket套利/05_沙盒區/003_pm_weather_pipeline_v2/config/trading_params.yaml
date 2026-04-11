@@ -48,6 +48,15 @@ backfill_start_date: "2023-01-01"  # 新城市回補預設起始日
 # Edge 縮水通知門檻
 position_edge_shrink_threshold: 0.10  # edge 降到此比例以下時推送 🟡 通知
 
+# === Remaining Gain 機率模型（v7.5，2026-04-11）===
+# 在距結算 <= remaining_gain_max_lead_hours 時，用 GFS 歷史 ECDF 取代 ECDF 機率
+remaining_gain_enabled: true
+remaining_gain_max_lead_hours: 6         # 只在 <= 6h 啟用（suppress 窗口剛好重疊）
+remaining_gain_min_local_hour: 7         # local_hour < 7 不啟用（7AM 前 obs 可信度低）
+remaining_gain_obs_max_age_minutes: 20   # obs fetched_at 超過 20 分鐘 → fallback
+remaining_gain_obs_time_max_age_minutes: 30  # obs_time 超過 30 分鐘 → fallback
+remaining_gain_min_bucket_samples: 30    # bucket 樣本 < 30 → fallback
+
 # === 即時觀測邏輯裁剪（2026-04-09）===
 use_current_obs: true                        # 啟用 WU v3 即時觀測邏輯裁剪
 current_obs_default_ttl_seconds: 1800        # 正常城市快取 30 分鐘（節省 API quota）

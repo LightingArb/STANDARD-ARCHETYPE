@@ -25,6 +25,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -562,6 +563,27 @@ def task_update_truth(city: str, csm) -> bool:
 
 
 # ============================================================
+# Obs 獨立線程
+# ============================================================
+
+def _obs_thread_loop(seed_cities: dict) -> None:
+    """
+    Daemon 線程：每 10 分鐘跑一次 obs fetch，與主迴圈完全平行。
+    主迴圈跑 backfill（10-30 分鐘）時 obs 仍照常更新。
+    """
+    OBS_INTERVAL = 600  # 10 分鐘
+    log.info("Obs thread: started (interval=10min)")
+    while True:
+        try:
+            csm = _load_csm()
+            ready = csm.get_ready_cities()
+            _run_obs_fetch(ready, seed_cities)
+        except Exception as e:
+            log.warning(f"Obs thread error: {e}")
+        time.sleep(OBS_INTERVAL)
+
+
+# ============================================================
 # 主循環
 # ============================================================
 
@@ -590,6 +612,17 @@ def run_collector(once: bool = False, verbose: bool = False) -> None:
 
     # 確保 observations 目錄存在
     _OBS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 啟動 obs daemon 線程（每 10 分鐘獨立更新，不受 backfill 阻塞）
+    if not once:
+        obs_thread = threading.Thread(
+            target=_obs_thread_loop,
+            args=(seed_cities,),
+            daemon=True,
+            name="obs-fetch",
+        )
+        obs_thread.start()
+        log.info("Obs thread started (every 10 min, independent of main loop)")
 
     # Bootstrap：首次使用時自動偵測既有城市（London/Paris 等）
     csm = _load_csm()
@@ -714,21 +747,26 @@ def run_collector(once: bool = False, verbose: bool = False) -> None:
                     log.warning(f"Peak hours build failed: {ph_result.stderr[:200]}")
             except Exception as e:
                 log.warning(f"Peak hours build error: {e}")
+            # Truth 更新完成後，重建 remaining_gain 模型
+            try:
+                log.info("Rebuilding remaining gain models after truth update...")
+                rg_result = subprocess.run(
+                    [sys.executable, "tools/build_remaining_gain.py"],
+                    cwd=str(PROJ_DIR),
+                    capture_output=True, text=True, timeout=300,
+                )
+                if rg_result.returncode == 0:
+                    log.info("Remaining gain models rebuilt OK")
+                else:
+                    log.warning(f"Remaining gain build failed: {rg_result.stderr[:200]}")
+            except Exception as e:
+                log.warning(f"Remaining gain build error: {e}")
             _update_system_health("collector_main", {
                 "status": "running",
                 "pid": os.getpid(),
                 "last_truth_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "last_error": f"truth failed: {truth_failed_cities}" if truth_failed_cities else None,
             })
-
-        # Step 5: 即時觀測（每 10 分鐘）
-        if scheduler.should_update_obs():
-            try:
-                obs_ready = csm.get_ready_cities()
-                _run_obs_fetch(obs_ready, seed_cities)
-            except Exception as e:
-                log.warning(f"obs fetch error: {e}")
-            scheduler.mark_obs_updated()
 
         if once:
             log.info("Collector: --once mode, exiting after one cycle.")
