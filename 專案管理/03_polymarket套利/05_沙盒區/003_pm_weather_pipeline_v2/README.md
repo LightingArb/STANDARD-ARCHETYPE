@@ -1,4 +1,4 @@
-# PM Weather Signal Pipeline v7.2
+# PM Weather Signal Pipeline
 
 Polymarket 天氣合約交易信號系統。用 GFS 預報誤差分布（ECDF）計算事件機率，與市場價格比較找出 edge，透過 Telegram Bot 推送信號。
 
@@ -8,24 +8,37 @@ Polymarket 天氣合約交易信號系統。用 GFS 預報誤差分布（ECDF）
 
 ```
 collector_main（排程 daemon）
-  ├── 每 6h：GFS 預報更新（05→07→09→10）
-  ├── 每 24h：WU 真值更新（06→07→09→10）
-  ├── 每 24h：城市掃描 + 新城市回補（12→13→14）
-  └── 每 10min：即時觀測抓取 → latest_obs.json + CSV
+├── 每 6h：GFS forecast 更新（05 → GFS peak → 07 → 09 → 10）
+├── 每 24h：WU truth 更新（06 → 07 → 09 → 10）
+├── 每日：城市掃描 + 回補（12 → 13 → 14）
+└── obs-fetch（獨立 daemon thread，每 10min）
+    → WU current → latest_obs.json + current_obs_YYYY-MM.csv
 
 signal_main（信號 daemon，每 30 秒）
-  ├── 抓報價（08）
-  ├── 跑 EV 計算（11）
-  ├── 寫 signal_summary.json
-  └── alert 推送（15）
+├── 抓報價（08）
+├── 讀 latest_obs.json（不直接打 WU）
+├── 跑 11_ev_engine.py（即時 ECDF + remaining_gain + 三模式信號）
+└── 跑 15_alert_engine.py
 
 telegram_bot（唯讀 UI daemon）
-  └── 讀 signal_summary.json + latest_obs.json → 顯示頁面
+├── 讀 per-city ev_signals.csv
+├── 讀 latest_obs.json
+└── 讀 GFS peak / static peak fallback
 ```
 
 ---
 
-## Pipeline 流程
+## 核心流程（白話版）
+
+1. **收集**：每 6 小時去問氣象局（GFS）未來 7 天每小時幾度；每天確認昨天真正幾度；每 10 分鐘看現在幾度
+2. **建模**：用 800 多天的「預測 vs 實際」差值，建一本歷史答案本（ECDF 模型）
+3. **算機率**：每 30 秒翻答案本，根據「離結算還多久」查對應那頁的機率分布
+4. **比價格**：拿機率跟 Polymarket 的市場價格比，找到市場定價錯誤的合約
+5. **推送**：把有 edge 的信號推到 Telegram，操盤手決定是否下單
+
+---
+
+## Pipeline
 
 ### 核心資料鏈
 
@@ -37,177 +50,134 @@ telegram_bot（唯讀 UI daemon）
 | 4 | `06_B_truth_fetch.py` | Weather Underground | `data/raw/B/{city}/truth_daily_high.csv` |
 | 5 | `07_daily_high_pipeline.py` | raw forecast + truth | `forecast_daily_high` + `truth_daily_high_b` + `error_table` |
 | 6 | `09_model_engine.py` | error_table | `data/models/empirical/{city}/empirical_model.json` |
-| 7 | `10_event_probability.py` | model + forecast + market_master | `data/results/probability/{city}/event_probability.csv` |
+| 7 | `10_event_probability.py` | empirical model + forecast + market_master | `data/results/probability/{city}/event_probability.csv` |
 | 8 | `08_market_price_fetch.py` | Polymarket CLOB API | `market_prices.csv` + `book_state/*.json` |
-| 9 | `11_ev_engine.py` | probability + prices + trading_params | `data/results/ev_signals/{city}/ev_signals.csv` |
+| 9 | `11_ev_engine.py` | probability + prices + params + obs + RG model | `data/results/ev_signals/{city}/ev_signals.csv` |
 
 ### 城市 Onboarding
 
 ```
 12_city_scanner.py → 13_city_status_manager.py → 14_backfill_manager.py
-  （掃描市場）         （狀態機管理）              （回補 05→06→07→09→03→04→10）
 ```
+
+狀態流：`discovered → backfilling → ready → failed / disabled`
+
+回補流程：`05 → 06 → 07 → 09 → 03 → 04 → 10`。03/04 為 blocking，10 在 `--cities` 模式下啟用 strict_mode。
 
 ---
 
-## 常駐服務
+## 機率模型
 
-### collector_main.py
+### Empirical ECDF（核心）
 
-```bash
-python collector_main.py --verbose      # 常駐
-python collector_main.py --once         # 一次性
-python collector_main.py --once-obs     # 只跑一次觀測
-```
+誤差定義：`error = actual_daily_high_c - predicted_daily_high_c`
 
-| 任務 | 週期 |
-|------|------|
-| 城市掃描（12→13→14） | 每日 06:00 UTC |
-| Truth 更新（06→07→09→10） | 每日 00:00 UTC |
-| Forecast 更新（05→07→09→10） | 每 6 小時 |
-| 即時觀測（WU current） | 每 10 分鐘 |
+Bucket 結構：`lead_hours_X`（每 6h，≥100 筆）為主，`lead_day_X`（每天，≥5 筆）為 fallback。
 
-### signal_main.py
+插值：相鄰 bucket 之間用 quantile interpolation（1D Wasserstein barycenter）平滑。三層 hierarchy：lead_hours 插值 → lead_day 插值 → nearest fallback。
 
-```bash
-python signal_main.py --mode rest --interval 30 --verbose   # REST 模式
-python signal_main.py --mode ws --verbose                   # WebSocket 模式
-python signal_main.py --once                                # 一次性
-```
-
-每輪：讀 ready 城市 → 08 抓報價 → 11 EV 計算 → 寫 signal_summary.json → 15 alert 推送
-
-容錯：連續失敗 ≥3 次 → sleep 60 秒
-
-### telegram_bot.py
-
-```bash
-python telegram_bot.py
-```
-
-純唯讀 UI，不直接呼叫 API 或修改資料。讀 signal_summary.json 和 latest_obs.json。
-
----
-
-## Telegram Bot 頁面
-
-### 按鈕
+事件邊界（閉區間）：
 
 ```
-[ 今日 ] [ 預警6-8h ] [ 結算<6h ]
-[ 排行 ] [   城市    ] [  管理   ]
-```
-
-### 頁面規格
-
-| 頁面 | 時間範圍 | 篩選 | 特色 |
-|------|---------|------|------|
-| 排行 | > 24h | BUY 信號（含幾乎確定） | 按 edge 或 depth 排序 |
-| 今日 | 8-24h | BUY 信號（含幾乎確定） | 加預報+實況溫度+峰值時段 |
-| 預警 | 6-8h | BUY 信號（含幾乎確定） | GFS 最後一版預報 |
-| 結算中 | < 6h | 全部合約 | 已鎖定/未鎖定分類 |
-| 城市 | 全部 | 全部合約 | 溫度 ladder + 日期按鈕 |
-| 管理 | — | — | 用戶管理 + 系統狀態 |
-
-### 城市頁 6 種狀態
-
-| 條件 | 顯示 |
-|------|------|
-| edge > 0 | `YES▲+4.2%` 或 `NO▲+12.2%` |
-| edge ≤ 0 | `無優勢` |
-| observation_clipped | `已鎖定（已超過）` |
-| market_extreme + NO 貴 | `幾乎確定NO` |
-| market_extreme + YES 貴 | `幾乎確定YES` |
-| 無掛單 | `無掛單` |
-| 價格過時 | `價格過時` |
-
-### 時間顯示
-
-所有時間顯示為台北時間（UTC+8）。
-
----
-
-## 模型
-
-### Empirical ECDF（核心模型）
-
-用 GFS 預報誤差（actual - predicted）的歷史分布，按 lead time 分 bucket，計算每個合約的 p_yes / p_no。
-
-**Bucket 結構**：
-
-| 類型 | 粒度 | 最低樣本量 | 說明 |
-|------|------|-----------|------|
-| `lead_hours_X` | 每 6 小時 | ≥ 100 | 主要使用 |
-| `lead_day_X` | 每天 | ≥ 5 | fallback |
-
-**Bucket 選擇優先序**：lead_hours exact → lead_day exact → 最近 lead_day fallback
-
-**事件邊界（半開區間）**：
-
-```
-exact X:   actual ∈ [X-h, X+h)     h = precision_half
-range L-H: actual ∈ [L-h, H+h)
+exact X:   actual ∈ [X-h, X+h]     h = precision_half
+range L-H: actual ∈ [L-h, H+h]
 higher X:  actual ≥ X-h
 below X:   actual < X+h
 ```
 
-### OU/AR(1)（可選）
+內部單位：predicted_daily_high 和 model errors 永遠是 °C。華氏市場的門檻先轉 °C 再計算。
 
-`data/models/ou_ar/{city}/ou_model.json`，09 best-effort 產出，10 目前未使用。
+### 即時機率（Phase 1.5）
 
-### Quantile Regression（可選）
+11_ev_engine.py 支援三種機率來源，優先序：
 
-需要 `statsmodels`，09 best-effort 產出，10 目前未使用。
+| `probability_mode` | 條件 | 說明 |
+|--------------------|------|------|
+| `remaining_gain` | ≤6h + 新鮮觀測 | 觀測 running max + 歷史剩餘升幅 ECDF |
+| `realtime_ecdf` | `use_realtime_probability: true` | 每 30 秒用當前 lead_hours 即時查 ECDF |
+| `batch_ecdf` | fallback | 10 批次寫好的固定 p_yes |
+
+11 使用 module-level lazy cache + mtime reload 載入 empirical model。
+
+### Remaining Gain（≤6h）
+
+`remaining_gain = final_max - running_max`，按 local_hour 分 24 桶。`tools/build_remaining_gain.py` 建模。
+
+---
+
+## 三種信號模式
+
+| 模式 | 邏輯 | 信號量 |
+|------|------|--------|
+| 散彈（scatter） | EV > 0 就出信號 | 最多 |
+| 精準（precision） | 散彈 + 90% 區間方向矛盾時壓制 | 中等 |
+| 點射（sniper） | 90% 區間必須完全落在信號方向一側 | 最少 |
+
+lock_range 用 signed error p05/p95（非對稱）。higher/below 可方向鎖定，exact/range 只做逆風壓制。
+
+---
+
+## GFS 動態峰值
+
+`_lib/gfs_peak_hours.py` 從 GFS hourly 找每日最高溫時段（±1h 窗口）。先選最新 snapshot → 該 snapshot 的 24 筆 → `forecast_temp` argmax。
+
+峰值來源優先序：`gfs_peak_hours.json` → `city_peak_hours.json`（靜態）。Google Weather API 已凍結。
+
+峰值已過自動鎖定（`now_local > peak_end_local_datetime`）。
 
 ---
 
 ## 即時觀測
 
-```
-collector_main（每 10 分鐘）
-  → WU v3 API（by ICAO station code）
-  → data/observations/latest_obs.json（merge 式，原子寫入）
-  → data/observations/current_obs_YYYY-MM.csv（按月分檔，append）
+collector obs thread 每 10 分鐘寫 `latest_obs.json`。signal_main 只讀此檔（fail-open：缺檔 = 不裁剪）。
 
-signal_main → 讀 latest_obs.json → 傳給 11（觀測裁剪）
-telegram_bot → 讀 latest_obs.json → 顯示實況溫度
-```
-
-**latest_obs.json schema**：
-
-```json
-{
-  "schema_version": 1,
-  "updated_at_utc": "2026-04-10T14:31:05Z",
-  "cities": {
-    "London": {
-      "high_c": 22.0,
-      "current_temp_c": 18.5,
-      "obs_time_utc": "2026-04-10T14:30:00Z",
-      "fetched_at_utc": "2026-04-10T14:31:05Z",
-      "source": "v3_current",
-      "station_code": "EGLC",
-      "status": "ok",
-      "schema_version": 1
-    }
-  }
-}
-```
-
-只抓 ready 城市。抓取失敗時保留舊值，不覆蓋。
+Observation clipping：用即時觀測做物理邏輯裁剪（最終最高溫 ≥ 目前最高溫）。統一使用 `parse_obs_time_utc()` 解析時間。
 
 ---
 
 ## 安全閘門
 
-| 條件 | signal_status | signal_action | Bot 顯示 |
-|------|-------------|---------------|---------|
-| 結算 < 6h | too_close_to_settlement | SUPPRESSED | 結算中頁 |
-| 結算 6-8h | last_forecast_warning | 正常判斷 | 預警頁 |
-| 一邊 > 95¢ | market_extreme | 正常判斷 | 幾乎確定YES/NO |
-| 無掛單 | no_price | SUPPRESSED | 無掛單 |
-| 報價超齡 | stale_price | SUPPRESSED | 價格過時 |
-| 正常 | active | BUY_YES/BUY_NO/NO_TRADE | 排行/今日 |
+| 條件 | 行為 |
+|------|------|
+| 結算 < 6h（非 RG） | SUPPRESSED |
+| 結算 < 6h（RG 模式） | 正常（RG 目標就是此窗口） |
+| 結算 6-8h | 標記 last_forecast_warning |
+| 一邊 > 95¢ | SUPPRESSED |
+| 無掛單 / 報價超齡 / Book 不完整 | SUPPRESSED |
+
+---
+
+## Telegram Bot
+
+主鍵盤：`[ 今日 ] [ 預警6-8h ] [ 結算<6h ]` / `[ 排行 ] [ 城市 ] [ 管理 ]`
+
+管理面板頂部：模式切換 `[ 散彈 ] [ 精準 ] [ 點射 ] [ 說明 ]`（所有 allowed 用戶可見）
+
+峰值顯示：倒數中 / 🔥峰值進行中 / ✅峰值已過
+
+所有時間顯示為台北時間（UTC+8）。
+
+---
+
+## Config
+
+| 檔案 | 用途 |
+|------|------|
+| `config/trading_params.yaml` | 所有可調參數 |
+| `config/seed_cities.json` | 城市 metadata |
+| `config/city_override.json` | 覆蓋 seed |
+| `config/telegram.yaml` | Bot token（不進 git） |
+| `config/wu_api_key.txt` | WU Key（不進 git） |
+| `config/city_peak_hours.json` | 靜態峰值 fallback |
+
+```yaml
+# trading_params.yaml 重要旗標
+use_realtime_probability: true
+use_convergence_interpolation: true
+remaining_gain_enabled: true
+signal_mode: scatter
+direction_lock_confidence: 0.90
+```
 
 ---
 
@@ -215,97 +185,34 @@ telegram_bot → 讀 latest_obs.json → 顯示實況溫度
 
 ```
 data/
-├── market_master.csv                    # 交易主表
-├── city_status.json                     # 城市狀態機
-├── 03_market_catalog.csv                # 市場清單
-├── positions.json                       # 持倉記錄
-├── _signal_state.json                   # signal 迴圈狀態
-├── _system_health.json                  # 進程心跳
-├── observations/
-│   ├── latest_obs.json                  # 即時觀測快照
-│   └── current_obs_YYYY-MM.csv          # 觀測歷史（按月）
-├── raw/
-│   ├── D/{city}/gfs_seamless/           # GFS 逐小時預報
-│   ├── B/{city}/                        # WU 真值
-│   └── prices/                          # 市場報價 + orderbook
-├── processed/
-│   ├── forecast_daily_high/{city}/      # 每日最高溫預報
-│   ├── truth_daily_high/                # 真值彙整
-│   └── error_table/{city}/              # 預報誤差表
-├── models/
-│   ├── empirical/{city}/                # ECDF 模型（核心）
-│   ├── ou_ar/{city}/                    # OU/AR(1)（可選）
-│   └── quantile_regression/{city}/      # QR（可選）
-└── results/
-    ├── probability/{city}/              # 事件機率
-    ├── ev_signals/{city}/               # EV 信號
-    └── signal_summary.json              # 預計算信號分組
+├── market_master.csv
+├── city_status.json / users.json
+├── gfs_peak_hours.json                    # GFS 動態峰值
+├── observations/latest_obs.json           # 即時觀測
+├── raw/D/{city}/gfs_seamless/             # GFS 預報
+├── raw/B/{city}/                          # WU 真值
+├── raw/prices/                            # 報價 + orderbook
+├── processed/error_table/{city}/          # 預報誤差表
+├── models/empirical/{city}/               # ECDF 模型
+├── models/remaining_gain/{city}/          # RG 模型
+├── results/probability/{city}/            # 批次機率
+└── results/ev_signals/{city}/             # EV 信號（Bot 主讀）
 ```
-
----
-
-## Config
-
-| 檔案 | 用途 | 注意 |
-|------|------|------|
-| `config/seed_cities.json` | 城市 metadata（station_code / timezone / unit 等） | |
-| `config/city_override.json` | 覆蓋 seed_cities（優先序最高） | |
-| `config/trading_params.yaml` | 交易參數（fee / edge / 安全閘門 / TTL） | |
-| `config/telegram.yaml` | Bot token + chat ID | **含 secret，不進 git** |
-| `config/wu_api_key.txt` | WU API Key | **含 secret，不進 git** |
-| `config/city_peak_hours.json` | 各城市各月峰值時段 | `tools/build_peak_hours.py` 生成 |
 
 ---
 
 ## 部署
 
-### 環境
-
 ```bash
-# Python 3.9+（建議 3.10+）
 pip install requests pyyaml "python-telegram-bot>=20"
-
-# 可選
-pip install websockets              # WS 價格流
-pip install numpy statsmodels       # QR 模型
-
-# 環境檢查
 python 02_init.py
-```
 
-### 啟動（三進程）
-
-```bash
 screen -S collector -dm bash -c "cd /opt/pm-weather && python3 collector_main.py --verbose"
 screen -S signal -dm bash -c "cd /opt/pm-weather && python3 signal_main.py --mode rest --interval 30 --verbose"
 screen -S bot -dm bash -c "cd /opt/pm-weather && python3 telegram_bot.py"
 ```
 
-### 維運
-
-```bash
-screen -r collector          # 接入 log（Ctrl+A,D 分離）
-screen -ls                   # 列出所有 screen
-
-# 城市管理
-python3 13_city_status_manager.py --list
-python3 13_city_status_manager.py --ready
-
-# 手動回補
-python3 14_backfill_manager.py --cities "Tokyo,Seoul"
-python3 14_backfill_manager.py --retry-failed
-
-# 測試
-python3 tools/smoke_test.py -v
-```
-
-### 更新
-
-```bash
-git pull origin main
-killall screen
-# 重新啟動三進程
-```
+安全重啟用 `screen -S {name} -X quit`，不要 `killall screen`。
 
 ---
 
@@ -313,31 +220,21 @@ killall screen
 
 | 檔案 | 功能 |
 |------|------|
-| `01_main.py` | 手動 dispatcher（串跑 03→11） |
-| `02_init.py` | 目錄初始化 + 環境檢查 |
-| `03_market_catalog.py` | Gamma API 掃描市場 + 語義解析 |
-| `04_market_master.py` | 合併 catalog + seed → 交易主表 |
-| `05_D_forecast_fetch.py` | GFS 預報抓取（live / historical） |
+| `03_market_catalog.py` | 市場掃描 |
+| `04_market_master.py` | 交易主表 |
+| `05_D_forecast_fetch.py` | GFS 預報抓取 |
 | `06_B_truth_fetch.py` | WU 真值抓取 |
-| `07_daily_high_pipeline.py` | hourly → daily + 誤差表 |
-| `08_market_price_fetch.py` | Polymarket CLOB REST 報價 |
-| `08b_price_stream.py` | WebSocket 價格流 |
-| `08c_book_state.py` | In-memory orderbook 管理 |
-| `09_model_engine.py` | 誤差分布建模（ECDF / OU / QR） |
-| `10_event_probability.py` | ECDF 計算 p_yes / p_no |
-| `11_ev_engine.py` | EV + edge + 安全閘門 + 信號 |
-| `12_city_scanner.py` | 掃描可用城市 |
-| `13_city_status_manager.py` | 城市狀態機 |
-| `14_backfill_manager.py` | 新城市回補 |
-| `15_alert_engine.py` | 信號篩選 + Telegram 推送 |
-| `16_position_manager.py` | 持倉追蹤 |
-| `collector_main.py` | 排程 daemon |
-| `signal_main.py` | 信號 daemon |
-| `telegram_bot.py` | Telegram Bot UI |
-| `_lib/signal_reader.py` | Bot 資料讀取層 |
-| `_lib/current_obs_fetcher.py` | WU 即時觀測 fetcher |
-| `_lib/fill_simulator.py` | Orderbook 填充模擬 |
-| `tools/smoke_test.py` | 回歸測試 |
-| `tools/build_peak_hours.py` | 峰值時段建檔 |
-
-`legacy/` 和 `_lib_legacy/` 為歷史封存，不屬於主線。
+| `07_daily_high_pipeline.py` | daily high + 誤差表 |
+| `08_market_price_fetch.py` | 報價抓取 |
+| `09_model_engine.py` | ECDF 建模 |
+| `10_event_probability.py` | 批次機率 + 插值 + q05/q95 |
+| `11_ev_engine.py` | 即時 p_yes + EV + 三模式 + RG |
+| `12-14` | 城市掃描 / 狀態機 / 回補 |
+| `15_alert_engine.py` | Alert 推送 |
+| `20_backtest.py` | 三模式回測 |
+| `_lib/ecdf_query.py` | ECDF 查詢核心 |
+| `_lib/gfs_peak_hours.py` | GFS 峰值計算 |
+| `_lib/signal_reader.py` | Bot 讀取層（mode-aware） |
+| `_lib/obs_time_utils.py` | obs 時間解析 |
+| `tools/build_remaining_gain.py` | RG 模型建檔 |
+| `tools/build_peak_hours.py` | 靜態峰值建檔 |
