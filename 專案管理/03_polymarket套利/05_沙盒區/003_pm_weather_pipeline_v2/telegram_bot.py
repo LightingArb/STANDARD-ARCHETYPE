@@ -30,7 +30,7 @@ from typing import Optional
 
 PROJ_DIR = Path(__file__).resolve().parent
 
-SEPARATOR = "────────────────────────────────"  # 32 個 ─，頁面分隔線
+SEPARATOR = "────────────────"  # 16 個 ─，頁面分隔線
 CITIES_PER_PAGE = 10  # 城市列表每頁數量
 
 # ── 峰值時段靜態資料（啟動時讀，build_peak_hours.py 離線產生）─────────────
@@ -585,9 +585,9 @@ def _get_peak_info(city: str, market_date_str: str, city_tz_str: str) -> str:
                 status = "🔥峰值中"
             else:
                 status = "✅已過峰值"
-            return f"峰值：台北時間 {date_prefix} {start_taipei}-{end_taipei} {status}"
+            return f"峰值：{date_prefix} {start_taipei}-{end_taipei} {status}"
         else:
-            return f"峰值：台北時間 {date_prefix} {start_taipei}-{end_taipei}"
+            return f"峰值：{date_prefix} {start_taipei}-{end_taipei}"
     except Exception:
         return ""
 
@@ -682,12 +682,12 @@ def _fmt_contract_block(row: dict) -> str:
     if yes_edge > 0.01 and p_yes is not None and yes_ask is not None:
         yes_depth = _safe_float(row.get("yes_sweet_usd"), 0) or _safe_float(row.get("yes_depth_usd"), 0)
         d_str = f"D${yes_depth:.0f}" if yes_depth > 0 else ""
-        lines.append(f"▲ 買YES  市場${yes_ask:.2f}→${p_yes:.2f}（+{yes_edge*100:.1f}%）{d_str}".rstrip())
+        lines.append(f"買YES ${yes_ask:.2f}→${p_yes:.2f}（+{yes_edge*100:.1f}%）{d_str}".rstrip())
 
     if no_edge > 0.01 and p_no is not None and no_ask is not None:
         no_depth = _safe_float(row.get("no_sweet_usd"), 0) or _safe_float(row.get("no_depth_usd"), 0)
         d_str = f"D${no_depth:.0f}" if no_depth > 0 else ""
-        lines.append(f"▲ 買NO  市場${no_ask:.2f}→${p_no:.2f}（+{no_edge*100:.1f}%）{d_str}".rstrip())
+        lines.append(f"買NO ${no_ask:.2f}→${p_no:.2f}（+{no_edge*100:.1f}%）{d_str}".rstrip())
 
     return "\n".join(lines)
 
@@ -1325,7 +1325,7 @@ class WeatherSignalBot:
                     jump_btns.append(InlineKeyboardButton(f"#{i}", callback_data=cb))
             total_pages = (total + self.page_size - 1) // self.page_size
             current_page = offset // self.page_size + 1
-            lines.append(f"                          {current_page} / {total_pages}")
+            lines.append(f"{current_page}/{total_pages}")
 
         nav = []
         if offset > 0:
