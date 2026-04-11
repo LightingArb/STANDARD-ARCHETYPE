@@ -20,6 +20,7 @@ Config 路徑（依優先順序）：
 import importlib.util
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -28,6 +29,9 @@ from pathlib import Path
 from typing import Optional
 
 PROJ_DIR = Path(__file__).resolve().parent
+
+SEPARATOR = "────────────────────────────────"  # 32 個 ─，頁面分隔線
+CITIES_PER_PAGE = 10  # 城市列表每頁數量
 
 # ── 峰值時段靜態資料（啟動時讀，build_peak_hours.py 離線產生）─────────────
 _PEAK_HOURS_PATH = PROJ_DIR / "config" / "city_peak_hours.json"
@@ -904,18 +908,17 @@ class WeatherSignalBot:
 
     # ── 城市列表 ──────────────────────────────────────────────
 
-    async def cb_cities(
-        self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
-    ) -> None:
-        if not await self._check_access(update):
-            return
-        cities = self.reader.get_ready_cities()
-        if not cities:
-            await self._reply(update, "目前沒有 ready 城市", [])
-            return
+    def _build_city_keyboard(self, cities: list, page: int = 1) -> list:
+        """城市列表 inline keyboard，含分頁（每頁 CITIES_PER_PAGE 個）。"""
+        sorted_cities = sorted(cities)
+        total_pages = math.ceil(len(sorted_cities) / CITIES_PER_PAGE)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * CITIES_PER_PAGE
+        end = start + CITIES_PER_PAGE
+        page_cities = sorted_cities[start:end]
 
         keyboard = []
-        for city in cities:
+        for city in page_cities:
             dates = self.reader.get_available_dates(city)
             if len(dates) >= 2:
                 date_hint = f"({_fmt_date(dates[0])} ~ {_fmt_date(dates[-1])})"
@@ -928,7 +931,50 @@ class WeatherSignalBot:
                     f"{city} {date_hint}", callback_data=f"city:{city}:latest"
                 )
             ])
+
+        if total_pages > 1:
+            page_btns = []
+            for p in range(1, total_pages + 1):
+                label = f"✓{p}" if p == page else str(p)
+                page_btns.append(InlineKeyboardButton(
+                    label, callback_data=f"city_page:{p}"
+                ))
+            keyboard.append(page_btns)
+
+        return keyboard
+
+    async def cb_cities(
+        self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
+    ) -> None:
+        if not await self._check_access(update):
+            return
+        cities = self.reader.get_ready_cities()
+        if not cities:
+            await self._reply(update, "目前沒有 ready 城市", [])
+            return
+        keyboard = self._build_city_keyboard(cities, page=1)
         await self._reply(update, "選擇城市", keyboard)
+
+    async def cb_city_page(
+        self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
+    ) -> None:
+        """城市列表翻頁：city_page:{page}"""
+        if not await self._check_access(update):
+            return
+        data = update.callback_query.data  # "city_page:{page}"
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 1
+        cities = self.reader.get_ready_cities()
+        if not cities:
+            await update.callback_query.answer("目前沒有 ready 城市")
+            return
+        keyboard = self._build_city_keyboard(cities, page=page)
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     # ── 城市信號頁（全合約梯形 + 日期按鈕 + 台北時間）──────────
 
@@ -1193,7 +1239,7 @@ class WeatherSignalBot:
           - 預報最高溫 + 實況最高溫（有才顯示）
           - 峰值時段 + 當前狀態
         """
-        lines = [f"<b>{title}</b>"]
+        lines = [f"<b>{title}</b>", SEPARATOR]
         jump_btns = []
 
         if not results:
@@ -1204,7 +1250,7 @@ class WeatherSignalBot:
                 date = row.get("market_date_local", "?")
                 city_tz = self.reader.get_city_timezone(city)
 
-                entry = f"\n{i})"
+                entry = f"{i})"
                 entry += f"\n  {city} · {_fmt_date(date)}"
                 entry += f"\n  {_fmt_settlement_full(date, city_tz)}"
 
@@ -1258,12 +1304,13 @@ class WeatherSignalBot:
                     entry += f"\n{rest[0]}"
 
                 lines.append(entry)
+                lines.append(SEPARATOR)
                 cb = f"rank_jump:{city}:{date}"
                 if len(cb) <= 64:
                     jump_btns.append(InlineKeyboardButton(f"#{i}", callback_data=cb))
             total_pages = (total + self.page_size - 1) // self.page_size
             current_page = offset // self.page_size + 1
-            lines.append(f"\n                          {current_page} / {total_pages}")
+            lines.append(f"                          {current_page} / {total_pages}")
 
         nav = []
         if offset > 0:
@@ -2576,6 +2623,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.cmd_start))
     # Callback handlers
     app.add_handler(CallbackQueryHandler(bot.cb_cities, pattern="^cities$"))
+    app.add_handler(CallbackQueryHandler(bot.cb_city_page, pattern="^city_page:"))
     app.add_handler(CallbackQueryHandler(bot.cb_city_signals, pattern="^city:"))
     app.add_handler(CallbackQueryHandler(bot.cb_ranking, pattern="^rank:"))
     app.add_handler(CallbackQueryHandler(bot.cb_today, pattern="^today:"))
